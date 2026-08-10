@@ -5,7 +5,7 @@ import { ZodError } from "zod";
 import { FieldError } from "@/lib/collection/validate";
 import { GatewayUnreachableError } from "@/lib/collection/client";
 import { classify, codeMessage, customerMessage } from "@/lib/collection/codes";
-import { SettingsError } from "@/lib/settings";
+import { ConfigurationError, SettingsError } from "@/lib/settings";
 
 export interface ApiOk<T = unknown> {
   ok: true;
@@ -66,6 +66,14 @@ export function handleRouteError(error: unknown) {
   }
   if (error instanceof SettingsError) {
     return err("BAD_SETTING", error.message, 422);
+  }
+  /**
+   * 503, and explicitly *not* indeterminate: no request reached the gateway, so
+   * unlike an unreachable host this cannot have moved money. Saying "awaiting
+   * confirmation" here would be a lie that leaves an order pending forever.
+   */
+  if (error instanceof ConfigurationError) {
+    return err("NOT_CONFIGURED", error.message, 503);
   }
   console.error("[api]", error);
   return err("INTERNAL", "Something went wrong. Please try again.", 500);

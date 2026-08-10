@@ -1,11 +1,15 @@
 import { redirect } from "next/navigation";
 
 import { GatewaySettingsForm } from "@/components/GatewaySettingsForm";
-import { getGatewayConfig, readGatewaySettings } from "@/lib/settings";
+import { getGatewayConfigState, readGatewaySettings } from "@/lib/settings";
 import { getCurrentUser, isAdmin } from "@/lib/supabase/server";
 
 /** The configuration is read per request; never serve it from the route cache. */
 export const dynamic = "force-dynamic";
+
+function NotSet() {
+  return <span className="text-amber-700 dark:text-amber-400">Not set</span>;
+}
 
 export default async function SettingsPage() {
   const user = await getCurrentUser();
@@ -23,9 +27,13 @@ export default async function SettingsPage() {
   }
 
   const [effective, row] = await Promise.all([
-    getGatewayConfig(),
+    getGatewayConfigState(),
     readGatewaySettings(),
   ]);
+
+  const missing = (["merchantId", "flow", "baseUrl"] as const).filter(
+    (field) => effective[field] === null,
+  );
 
   return (
     <div className="max-w-2xl space-y-8">
@@ -36,6 +44,16 @@ export default async function SettingsPage() {
           call — no redeploy — so they also change where live payments go.
         </p>
       </div>
+
+      {missing.length > 0 && (
+        <p className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">
+          Payments are switched off until this is complete —{" "}
+          {missing.length === 3
+            ? "nothing is configured yet"
+            : `${missing.length} value${missing.length > 1 ? "s" : ""} still missing`}
+          . Checkout will refuse rather than send a request that cannot succeed.
+        </p>
+      )}
 
       <GatewaySettingsForm
         effective={{
@@ -53,17 +71,23 @@ export default async function SettingsPage() {
       <dl className="card grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
         <dt className="text-slate-500">In use — Merchant ID</dt>
         <dd>
-          {effective.merchantId}{" "}
+          {effective.merchantId ?? <NotSet />}{" "}
           <span className="text-xs text-slate-500">({effective.source.merchantId})</span>
         </dd>
         <dt className="text-slate-500">In use — Flow</dt>
         <dd>
-          {effective.flow === "otp" ? "OTP" : "Non-OTP"}{" "}
+          {effective.flow === null ? (
+            <NotSet />
+          ) : effective.flow === "otp" ? (
+            "OTP"
+          ) : (
+            "Non-OTP"
+          )}{" "}
           <span className="text-xs text-slate-500">({effective.source.flow})</span>
         </dd>
         <dt className="text-slate-500">In use — Base URL</dt>
         <dd className="break-all">
-          {effective.baseUrl}{" "}
+          {effective.baseUrl ?? <NotSet />}{" "}
           <span className="text-xs text-slate-500">({effective.source.baseUrl})</span>
         </dd>
         {row?.updated_at && (

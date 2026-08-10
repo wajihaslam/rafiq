@@ -126,9 +126,10 @@ guess and must get from whoever provisioned the merchant:
 Also confirm the MID's `packages` include Wallets, Wallet Tokenization and
 Hosted Page, or those calls answer `0106 Merchant-not-allowed`.
 
-Three of these — merchant id, flow and the Payment API base URL — can also be
-changed at runtime; see [Runtime configuration](#runtime-configuration) below.
-The env vars stay required either way: they are the fallback.
+Three of these — merchant id, flow and the Payment API base URL — **do not
+belong in the environment at all**. They live in the database and are edited from
+`/settings`; the env vars are optional bootstrap overrides. See
+[Runtime configuration](#runtime-configuration).
 
 ### 3. Run
 
@@ -169,10 +170,26 @@ and merchants, without a redeploy:
 | Flow | `COLLECTION_FLOW` | OTP or Non-OTP — must match the MID |
 | Base URL for Payment API | `COLLECTION_BASE_URL` | origin only; the gateway prefix and path are appended |
 
-They live in the single-row `gateway_settings` table, and resolution is
-per column: a blank field clears the override and falls back to the environment.
-Every gateway call reads them at call time (memoised per request), so a change
-takes effect on the next request — including where live payments go.
+They live in the single-row `gateway_settings` table, which is **sufficient on
+its own** — the app needs no `COLLECTION_BASE_URL`, `COLLECTION_MERCHANT_ID` or
+`COLLECTION_FLOW` in the environment. Those remain as optional bootstrap
+overrides (handy for CI), and the row wins whenever it is set.
+
+Resolution is per column: a blank field clears the override and falls back to the
+environment, or to nothing at all if the environment is silent too. Every gateway
+call reads the config at call time (memoised per request), so a change takes
+effect on the next request — including where live payments go.
+
+When a value is set in neither place, a gateway call raises `ConfigurationError`
+and the route answers **503 `NOT_CONFIGURED`** with a message naming the missing
+fields. That is deliberately *not* treated as an indeterminate outcome: no
+request left the process, so no money can have moved, and the order must not be
+left pending. `/settings` itself never throws on a gap — otherwise the one page
+that can fix the problem would be the one page you could not open.
+
+`COLLECTION_FLOW` has **no default**. Silently assuming `otp` would send every
+Non-OTP merchant down the wrong sequence and answer `0015` on every payment, so
+an unset flow is treated as unconfigured instead.
 
 The page and `PUT /api/settings/gateway` are admin-only. Grant access with:
 

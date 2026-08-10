@@ -49,20 +49,32 @@ export const serverEnv = {
   /** Secret key (`sb_secret_…`). Bypasses RLS — server only, never logged. */
   supabaseSecretKey: () => required("SUPABASE_SECRET_KEY"),
 
-  collectionBaseUrl: () => required("COLLECTION_BASE_URL").replace(/\/+$/, ""),
+  /**
+   * The three values below are *optional* overrides for bootstrapping only.
+   * `gateway_settings` in the database is the real home for them, so an unset
+   * variable is a normal state and must not throw — the caller reports a
+   * missing value against the settings page instead. See `@/lib/settings`.
+   */
+  collectionBaseUrl: (): string | undefined =>
+    process.env.COLLECTION_BASE_URL?.trim().replace(/\/+$/, "") || undefined,
+  merchantId: (): string | undefined =>
+    process.env.COLLECTION_MERCHANT_ID?.trim() || undefined,
+  /**
+   * Which sequence the MID is provisioned on. Calling the other flow's sequence
+   * answers 0015 Invalid-Flow, so this is not a preference — it must match how
+   * the merchant was provisioned. There is deliberately **no default**: silently
+   * guessing "otp" would send half of all merchants down the wrong sequence.
+   */
+  flow: (): CollectionFlow | undefined => {
+    const value = process.env.COLLECTION_FLOW?.trim();
+    if (value === "otp" || value === "non_otp") return value;
+    return undefined;
+  },
+
   collectionPrefix: () =>
     optional("COLLECTION_GATEWAY_PREFIX", "/mock/collection").replace(/\/+$/, ""),
-  merchantId: () => required("COLLECTION_MERCHANT_ID"),
   merchantKey: () => required("COLLECTION_MERCHANT_KEY"),
   refundSigningSecret: () => required("COLLECTION_REFUND_SIGNING_SECRET"),
-
-  /**
-   * Which sequence this MID is provisioned on. Calling the other flow's
-   * sequence answers 0015 Invalid-Flow, so this is not a preference — it must
-   * match how the merchant was provisioned.
-   */
-  flow: (): CollectionFlow =>
-    optional("COLLECTION_FLOW", "otp") === "non_otp" ? "non_otp" : "otp",
 
   region: () => optional("COLLECTION_REGION", "PK"),
   mode: () => optional("COLLECTION_MODE", "payin"),

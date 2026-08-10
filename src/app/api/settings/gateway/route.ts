@@ -7,10 +7,13 @@
 import { z } from "zod";
 
 import { handleRouteError, ok } from "@/lib/api";
-import { getGatewayConfig, saveGatewaySettings } from "@/lib/settings";
+import { getGatewayConfigState, saveGatewaySettings } from "@/lib/settings";
 import { requireAdmin } from "@/lib/supabase/server";
 
-/** An empty string means "clear the override and fall back to the env". */
+/**
+ * An empty string means "clear the override and fall back to the env" — or to
+ * nothing at all, if the env does not define it either.
+ */
 const blankToNull = z
   .string()
   .trim()
@@ -25,7 +28,9 @@ const schema = z.object({
 export async function GET() {
   try {
     await requireAdmin();
-    return ok(await getGatewayConfig());
+    // State, not the strict config: an admin must be able to read a half-set
+    // configuration in order to finish setting it.
+    return ok(await getGatewayConfigState());
   } catch (error) {
     return handleRouteError(error);
   }

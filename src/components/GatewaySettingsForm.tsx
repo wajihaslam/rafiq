@@ -4,9 +4,17 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 export interface GatewaySettingsFormProps {
-  /** Effective values — what the next gateway call will use. */
-  effective: { merchantId: string; flow: "otp" | "non_otp"; baseUrl: string };
-  /** The stored overrides. A null field is currently taken from the env. */
+  /**
+   * Effective values — what the next gateway call will use. A null means the
+   * value is set neither here nor in the environment, so payments are blocked
+   * until it is filled in.
+   */
+  effective: {
+    merchantId: string | null;
+    flow: "otp" | "non_otp" | null;
+    baseUrl: string | null;
+  };
+  /** The stored overrides. A null field falls back to the env, if set there. */
   stored: { merchantId: string | null; flow: string | null; baseUrl: string | null };
 }
 
@@ -74,7 +82,7 @@ export function GatewaySettingsForm({ effective, stored }: GatewaySettingsFormPr
           inputMode="numeric"
           value={merchantId}
           onChange={(e) => setMerchantId(e.target.value.replace(/\D/g, "").slice(0, 7))}
-          placeholder={effective.merchantId}
+          placeholder={effective.merchantId ?? "not set — required"}
         />
         <p className="mt-1 text-xs text-slate-500">
           Seven digits, as provisioned by the gateway. A wrong or unseeded MID
@@ -105,7 +113,10 @@ export function GatewaySettingsForm({ effective, stored }: GatewaySettingsFormPr
           This is not a preference — it must match how the MID was provisioned.
           Calling the other flow&apos;s sequence answers 0015 Invalid-Flow. Wallet
           linking always uses an OTP regardless.
-          {flow === "" && ` Currently from the environment: ${effective.flow}.`}
+          {flow === "" &&
+            (effective.flow
+              ? ` Currently from the environment: ${effective.flow}.`
+              : " Not set anywhere — pick one, or payments stay blocked.")}
         </p>
       </div>
 
@@ -119,7 +130,7 @@ export function GatewaySettingsForm({ effective, stored }: GatewaySettingsFormPr
           inputMode="url"
           value={baseUrl}
           onChange={(e) => setBaseUrl(e.target.value)}
-          placeholder={effective.baseUrl}
+          placeholder={effective.baseUrl ?? "https://gateway.example.com — required"}
         />
         <p className="mt-1 text-xs text-slate-500">
           Origin only, without the gateway prefix — the client appends that and

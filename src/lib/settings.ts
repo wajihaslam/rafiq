@@ -5,10 +5,14 @@
  * at runtime from /settings instead of only through the environment. Everything
  * else (merchant key, secrets, headers) stays in `serverEnv`.
  *
- * Resolution is row-then-env, per column: a null in `gateway_settings` means
- * "use the environment", so an untouched install behaves exactly as it did when
- * these were env-only. That also means the env vars remain required — the row
- * overrides them, it does not replace them.
+ * The database is the home for these: `gateway_settings` alone is enough to run
+ * the app. Resolution is row-then-env per column, but the environment is only a
+ * bootstrap fallback now — an unset variable is a normal state, not an error.
+ *
+ * A value that is missing from *both* is reported as a configuration gap
+ * pointing at /settings, and only at the moment a gateway call actually needs
+ * it. Nothing throws at import or on a page render, so the settings page can
+ * always be reached to fix the gap — which is the whole point.
  */
 
 import "server-only";
@@ -25,12 +29,23 @@ export interface GatewaySettingsRow {
   updated_by: string | null;
 }
 
+export type ConfigField = "merchantId" | "flow" | "baseUrl";
+export type ConfigSource = "settings" | "env" | "unset";
+
+/** What is configured right now, gaps included. Safe to render. */
+export interface GatewayConfigState {
+  merchantId: string | null;
+  flow: CollectionFlow | null;
+  baseUrl: string | null;
+  source: Record<ConfigField, ConfigSource>;
+}
+
+/** A complete configuration. Only obtainable when nothing is missing. */
 export interface GatewayConfig {
   merchantId: string;
   flow: CollectionFlow;
   baseUrl: string;
-  /** Where each value came from, so the settings page can say so. */
-  source: Record<"merchantId" | "flow" | "baseUrl", "settings" | "env">;
+  source: Record<ConfigField, ConfigSource>;
 }
 
 const MERCHANT_ID = /^\d{7}$/;
@@ -42,6 +57,28 @@ export class SettingsError extends Error {
   ) {
     super(message);
     this.name = "SettingsError";
+  }
+}
+
+const FIELD_LABELS: Record<ConfigField, string> = {
+  merchantId: "Merchant ID",
+  flow: "Flow (OTP or Non-OTP)",
+  baseUrl: "Base URL for the Payment API",
+};
+
+/**
+ * Raised when a gateway call cannot proceed because the app has not been
+ * configured. Distinct from a gateway *failure*: no request was sent, so no
+ * money can have moved — which is why callers may safely treat it as a hard
+ * error rather than an indeterminate outcome.
+ */
+export class ConfigurationError extends Error {
+  constructor(readonly missing: ConfigField[]) {
+    const names = missing.map((f) => FIELD_LABELS[f]).join(", ");
+    super(
+      `The Collection gateway is not configured yet — missing: ${names}. An administrator can set this on the Configuration page.`,
+    );
+    this.name = "ConfigurationError";
   }
 }
 
@@ -99,34 +136,59 @@ export const readGatewaySettings = cache(
   },
 );
 
-/** The effective configuration every gateway call is made with. */
-export async function getGatewayConfig(): Promise<GatewayConfig> {
+/**
+ * What is configured right now, including what isn't. Never throws, so the
+ * settings page and its GET route can always render — including on a fresh
+ * install where nothing has been set.
+ */
+export async function getGatewayConfigState(): Promise<GatewayConfigState> {
   return resolve(await readGatewaySettings());
 }
 
-function resolve(row: GatewaySettingsRow | null): GatewayConfig {
+/**
+ * The configuration a gateway call is made with. Throws `ConfigurationError`
+ * if anything is missing, rather than sending a request that is certain to come
+ * back 0003 Invalid-Merchant — or worse, one aimed at the wrong host.
+ */
+export async function getGatewayConfig(): Promise<GatewayConfig> {
+  const state = await getGatewayConfigState();
+  const missing = (Object.keys(FIELD_LABELS) as ConfigField[]).filter(
+    (field) => state[field] === null,
+  );
+  if (missing.length > 0) throw new ConfigurationError(missing);
+  return state as GatewayConfig;
+}
+
+function resolve(row: GatewaySettingsRow | null): GatewayConfigState {
+  const merchantId = row?.merchant_id ?? serverEnv.merchantId() ?? null;
+  const flow = row?.flow ?? serverEnv.flow() ?? null;
+  const baseUrl = row?.base_url ?? serverEnv.collectionBaseUrl() ?? null;
+
   return {
-    merchantId: row?.merchant_id ?? serverEnv.merchantId(),
-    flow: row?.flow ?? serverEnv.flow(),
-    baseUrl: row?.base_url ?? serverEnv.collectionBaseUrl(),
+    merchantId,
+    flow,
+    baseUrl,
     source: {
-      merchantId: row?.merchant_id ? "settings" : "env",
-      flow: row?.flow ? "settings" : "env",
-      baseUrl: row?.base_url ? "settings" : "env",
+      merchantId: row?.merchant_id ? "settings" : merchantId ? "env" : "unset",
+      flow: row?.flow ? "settings" : flow ? "env" : "unset",
+      baseUrl: row?.base_url ? "settings" : baseUrl ? "env" : "unset",
     },
   };
 }
 
 /**
  * Writes the singleton. Passing `null` for a field clears the override and
- * hands that value back to the environment.
+ * hands that value back to the environment — or leaves it unset, if the
+ * environment does not define it either. Saving a partial configuration is
+ * allowed on purpose: it is the natural intermediate state while filling the
+ * form in, and only a gateway call insists on completeness.
  */
 export async function saveGatewaySettings(input: {
   merchantId: string | null;
   flow: string | null;
   baseUrl: string | null;
   updatedBy: string;
-}): Promise<GatewayConfig> {
+}): Promise<GatewayConfigState> {
   const patch = {
     merchant_id:
       input.merchantId === null ? null : assertSettingsMerchantId(input.merchantId),
