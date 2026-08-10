@@ -79,6 +79,31 @@ supabase db push                       # applies supabase/migrations/
 psql "$DATABASE_URL" -f supabase/seed.sql
 ```
 
+Or paste [supabase/setup.sql](supabase/setup.sql) — schema and seed concatenated —
+into the SQL editor in one go.
+
+#### One database for local and deployed
+
+By deliberate choice, local development points at the **same** Supabase project
+as the deployed app: `.env.local` and the Vercel environment carry identical
+`NEXT_PUBLIC_SUPABASE_URL` and key values. There is no local Postgres stack and
+no `supabase/config.toml`.
+
+Two consequences worth being awake to, since nothing in the code guards against
+them:
+
+- **Local activity is real data.** A test checkout from `localhost:3000` inserts
+  live rows into `orders`, `transactions` and `payment_tokens` — the same tables
+  the deployed app serves. Sign in as a throwaway user for testing so the rows
+  are easy to tell apart from real ones.
+- **A migration is immediately production.** Running SQL for local work changes
+  the deployed app's schema at the same instant. Additive changes are safe;
+  dropping or renaming a column breaks whatever is already deployed.
+
+If those ever start to bite, the split is cheap: create a second Supabase
+project, apply the same `setup.sql`, and point `.env.local` at it — nothing in
+the code reads a project ref, so no source change is needed.
+
 Under **Authentication → URL Configuration**, add
 `http://localhost:3000/auth/callback` and your Vercel URL's equivalent as
 redirect URLs, or magic links will bounce.
