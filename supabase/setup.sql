@@ -2,10 +2,12 @@
 -- Rafiq — one-paste setup for a fresh Supabase project.
 --
 -- Paste this whole file into the Supabase SQL editor and run it. It is the
--- concatenation of migrations/0001_init.sql, migrations/0002_gateway_settings.sql
--- and seed.sql, generated for convenience — those files remain the source of
--- truth, so edit them and regenerate rather than editing this one.
+-- concatenation of every file in migrations/ (in order) followed by seed.sql,
+-- generated for convenience — those files remain the source of truth, so edit
+-- them and regenerate rather than editing this one.
 -- ===========================================================================
+-- >>> migrations/0001_init.sql
+
 -- ===========================================================================
 -- Rafiq — Stage 1 (Collection): shopping cart + subscriptions/tokenization
 -- ===========================================================================
@@ -278,6 +280,9 @@ create policy subscription_charges_read on subscription_charges
 
 -- postbacks: service role only. No policy = no client access.
 
+
+-- >>> migrations/0002_gateway_settings.sql
+
 -- ===========================================================================
 -- Rafiq — runtime gateway configuration
 --
@@ -323,6 +328,9 @@ create policy gateway_settings_read_admin on gateway_settings
 -- Seed the singleton with all-null so the settings page always has a row to
 -- show; every column falls back to the environment until someone fills it in.
 insert into gateway_settings (id) values (true) on conflict (id) do nothing;
+
+
+-- >>> seed.sql
 
 -- Demo catalogue. Prices are PKR with at most 2 decimals — the gateway
 -- rejects anything else with 0002 Invalid-Product/Amount.
