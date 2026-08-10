@@ -20,14 +20,16 @@ function optional(name: string, fallback: string): string {
 
 export const publicEnv = {
   supabaseUrl: () => required("NEXT_PUBLIC_SUPABASE_URL"),
-  supabaseAnonKey: () => required("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
+  /** Publishable key (`sb_publishable_…`). Safe in the browser; RLS gates it. */
+  supabasePublishableKey: () => required("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"),
   appUrl: () => optional("NEXT_PUBLIC_APP_URL", "http://localhost:3000"),
 };
 
 export type CollectionFlow = "otp" | "non_otp";
 
 export const serverEnv = {
-  supabaseServiceRoleKey: () => required("SUPABASE_SERVICE_ROLE_KEY"),
+  /** Secret key (`sb_secret_…`). Bypasses RLS — server only, never logged. */
+  supabaseSecretKey: () => required("SUPABASE_SECRET_KEY"),
 
   collectionBaseUrl: () => required("COLLECTION_BASE_URL").replace(/\/+$/, ""),
   collectionPrefix: () =>

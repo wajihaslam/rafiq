@@ -8,7 +8,7 @@ import { publicEnv, serverEnv } from "@/lib/env";
 /** Request-scoped client that carries the signed-in user, so RLS applies. */
 export async function getSupabaseServerClient() {
   const cookieStore = await cookies();
-  return createServerClient(publicEnv.supabaseUrl(), publicEnv.supabaseAnonKey(), {
+  return createServerClient(publicEnv.supabaseUrl(), publicEnv.supabasePublishableKey(), {
     cookies: {
       getAll: () => cookieStore.getAll(),
       setAll: (toSet: Parameters<NonNullable<CookieMethodsServer["setAll"]>>[0]) => {
@@ -26,13 +26,13 @@ export async function getSupabaseServerClient() {
 }
 
 /**
- * Service-role client. Bypasses RLS — use only where there is no user session
+ * Secret-key client. Bypasses RLS — use only where there is no user session
  * (gateway postbacks, the subscription cron) or where the write must be
  * trusted (minting a token, marking an order paid). Never return its results
  * to a client without filtering by user_id yourself.
  */
 export function getSupabaseAdminClient() {
-  return createClient(publicEnv.supabaseUrl(), serverEnv.supabaseServiceRoleKey(), {
+  return createClient(publicEnv.supabaseUrl(), serverEnv.supabaseSecretKey(), {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 }
