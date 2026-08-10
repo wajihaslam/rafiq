@@ -3,7 +3,12 @@ import { createServerClient, type CookieMethodsServer } from "@supabase/ssr";
 
 import { publicEnv } from "@/lib/env";
 
-const PROTECTED = ["/cart", "/checkout", "/orders", "/wallets", "/subscriptions"];
+/**
+ * `/subscriptions` is deliberately absent: the plans page is a shop window and
+ * renders for signed-out visitors, swapping the subscribe control for a sign-in
+ * link. The API routes behind it still require a user.
+ */
+const PROTECTED = ["/cart", "/checkout", "/orders", "/wallets"];
 
 /**
  * Refreshes the Supabase session cookie on every request — Server Components

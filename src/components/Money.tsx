@@ -4,6 +4,9 @@ export function formatPkr(amount: number | string): string {
   return new Intl.NumberFormat("en-PK", {
     style: "currency",
     currency: "PKR",
+    // PKR is conventionally shown without paisa, but a fractional amount must
+    // not render as "Rs 149.5" — show both decimals when there are any.
+    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
     maximumFractionDigits: 2,
   }).format(value);
 }
