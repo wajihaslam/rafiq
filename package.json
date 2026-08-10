@@ -4,9 +4,9 @@
   "private": true,
   "description": "Rafiq — multipurpose app connecting to Collection and Remittance products.",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p 4000",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 4000",
     "lint": "next lint",
     "typecheck": "tsc --noEmit"
   },

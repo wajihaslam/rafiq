@@ -8,7 +8,7 @@ import { publicEnv } from "@/lib/env";
  * renders for signed-out visitors, swapping the subscribe control for a sign-in
  * link. The API routes behind it still require a user.
  */
-const PROTECTED = ["/cart", "/checkout", "/orders", "/wallets"];
+const PROTECTED = ["/cart", "/checkout", "/orders", "/wallets", "/settings"];
 
 /**
  * Refreshes the Supabase session cookie on every request — Server Components

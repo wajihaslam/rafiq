@@ -32,7 +32,7 @@ export async function POST() {
       })),
     });
 
-    const url = gateway.hostedCheckoutUrl({
+    const url = await gateway.hostedCheckoutUrl({
       orderId: order.order_ref,
       amount: cart.total,
       redirectUrl: `${publicEnv.appUrl()}/pay/hosted/return`,

@@ -14,8 +14,8 @@ import { err, fromGateway, handleRouteError } from "@/lib/api";
 import { closeCart, loadOpenCart } from "@/lib/cart";
 import * as gateway from "@/lib/collection/client";
 import { OPERATORS } from "@/lib/collection/types";
-import { serverEnv } from "@/lib/env";
 import { applyOutcome, createOrder, recordTransaction } from "@/lib/orders";
+import { getGatewayConfig } from "@/lib/settings";
 import { getSupabaseAdminClient, requireUser } from "@/lib/supabase/server";
 
 const schema = z
@@ -111,7 +111,7 @@ export async function POST(request: Request) {
     // ---- fresh wallet payment -------------------------------------------
     const operatorId = input.operatorId!;
     const msisdn = input.msisdn!;
-    const flow = serverEnv.flow();
+    const { flow } = await getGatewayConfig();
 
     const order = await createOrder({
       userId: user.id,

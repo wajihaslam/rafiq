@@ -92,7 +92,7 @@ no `supabase/config.toml`.
 Two consequences worth being awake to, since nothing in the code guards against
 them:
 
-- **Local activity is real data.** A test checkout from `localhost:3000` inserts
+- **Local activity is real data.** A test checkout from `localhost:4000` inserts
   live rows into `orders`, `transactions` and `payment_tokens` — the same tables
   the deployed app serves. Sign in as a throwaway user for testing so the rows
   are easy to tell apart from real ones.
@@ -105,7 +105,7 @@ project, apply the same `setup.sql`, and point `.env.local` at it — nothing in
 the code reads a project ref, so no source change is needed.
 
 Under **Authentication → URL Configuration**, add
-`http://localhost:3000/auth/callback` and your Vercel URL's equivalent as
+`http://localhost:4000/auth/callback` and your Vercel URL's equivalent as
 redirect URLs, or magic links will bounce.
 
 ### 2. Environment
@@ -125,6 +125,10 @@ guess and must get from whoever provisioned the merchant:
 
 Also confirm the MID's `packages` include Wallets, Wallet Tokenization and
 Hosted Page, or those calls answer `0106 Merchant-not-allowed`.
+
+Three of these — merchant id, flow and the Payment API base URL — can also be
+changed at runtime; see [Runtime configuration](#runtime-configuration) below.
+The env vars stay required either way: they are the fallback.
 
 ### 3. Run
 
@@ -151,6 +155,34 @@ npm run dev
 
 **The gateway must be reachable from Vercel's network.** A `localhost:8001`
 gateway will not be, and every call will time out into an indeterminate result.
+
+---
+
+## Runtime configuration
+
+`/settings` edits the three values that change most often between environments
+and merchants, without a redeploy:
+
+| Field | Overrides | Notes |
+| --- | --- | --- |
+| Merchant ID | `COLLECTION_MERCHANT_ID` | 7 digits, as provisioned |
+| Flow | `COLLECTION_FLOW` | OTP or Non-OTP — must match the MID |
+| Base URL for Payment API | `COLLECTION_BASE_URL` | origin only; the gateway prefix and path are appended |
+
+They live in the single-row `gateway_settings` table, and resolution is
+per column: a blank field clears the override and falls back to the environment.
+Every gateway call reads them at call time (memoised per request), so a change
+takes effect on the next request — including where live payments go.
+
+The page and `PUT /api/settings/gateway` are admin-only. Grant access with:
+
+```sql
+update profiles set is_admin = true where id = '<auth user id>';
+```
+
+Everything else — merchant key, the refund signing secret, region/mode/version
+headers, the postback and cron secrets — stays env-only on purpose: secrets do
+not belong in a table an app screen can edit.
 
 ---
 

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import "./globals.css";
-import { getCurrentUser } from "@/lib/supabase/server";
+import { getCurrentUser, isAdmin } from "@/lib/supabase/server";
 import { SignOutButton } from "@/components/SignOutButton";
 
 export const metadata: Metadata = {
@@ -17,6 +17,7 @@ export default async function RootLayout({
   children: React.ReactNode;
 }) {
   const user = await getCurrentUser();
+  const admin = user ? await isAdmin(user.id) : false;
 
   return (
     <html lang="en">
@@ -42,6 +43,11 @@ export default async function RootLayout({
                     Wallets
                   </Link>
                 </>
+              )}
+              {admin && (
+                <Link href="/settings" className="hover:underline">
+                  Configuration
+                </Link>
               )}
             </div>
             <div className="ml-auto flex items-center gap-3 text-sm">

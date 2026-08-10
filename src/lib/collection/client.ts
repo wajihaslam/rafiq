@@ -15,6 +15,7 @@ import "server-only";
 import { createHmac } from "node:crypto";
 
 import { serverEnv } from "@/lib/env";
+import { getGatewayConfig } from "@/lib/settings";
 import { classify, type Outcome } from "./codes";
 import {
   assertMerchantId,
@@ -66,8 +67,18 @@ export class GatewayUnreachableError extends Error {
   }
 }
 
-function endpoint(path: string): string {
-  return `${serverEnv.collectionBaseUrl()}${serverEnv.collectionPrefix()}${path}`;
+/**
+ * Base URL and merchant id are resolved per call, not at module load: both are
+ * runtime-configurable from /settings (falling back to the environment), so
+ * reading them once would pin the process to whatever was set at boot.
+ */
+async function endpoint(path: string): Promise<string> {
+  const { baseUrl } = await getGatewayConfig();
+  return `${baseUrl}${serverEnv.collectionPrefix()}${path}`;
+}
+
+async function merchantId(): Promise<string> {
+  return assertMerchantId((await getGatewayConfig()).merchantId);
 }
 
 /**
@@ -95,7 +106,7 @@ async function post<T>(
 ): Promise<GatewayCall<T>> {
   let response: Response;
   try {
-    response = await fetch(endpoint(path), {
+    response = await fetch(await endpoint(path), {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -157,7 +168,7 @@ export async function initiate(
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
   const body = {
-    merchantId: assertMerchantId(serverEnv.merchantId()),
+    merchantId: await merchantId(),
     operatorId,
     amount: formatAmount(input.amount),
     userKey: assertUserKey(input.userKey),
@@ -186,7 +197,7 @@ export async function verify(
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
   const body: Record<string, unknown> = {
-    merchantId: assertMerchantId(serverEnv.merchantId()),
+    merchantId: await merchantId(),
     operatorId,
     amount: formatAmount(input.amount),
     userKey: assertUserKey(input.userKey),
@@ -215,7 +226,7 @@ export async function finalize(
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
   const body = {
-    merchantId: assertMerchantId(serverEnv.merchantId()),
+    merchantId: await merchantId(),
     operatorId,
     orderId: assertUserKey(input.orderId),
     msisdn: normaliseMsisdn(input.msisdn),
@@ -242,7 +253,7 @@ export async function directPayment(
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
   const body = {
-    merchantId: assertMerchantId(serverEnv.merchantId()),
+    merchantId: await merchantId(),
     operatorId,
     transactionType: "8" as const,
     amount: formatAmount(input.amount),
@@ -265,7 +276,7 @@ export async function delink(
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
   const body = {
-    merchantId: assertMerchantId(serverEnv.merchantId()),
+    merchantId: await merchantId(),
     operatorId,
     sourceId: assertSourceId(input.sourceId),
   };
@@ -290,7 +301,7 @@ export async function inquiry(
     throw new Error("inquiry requires transactionId or userKey");
   }
   const body: Record<string, unknown> = {
-    merchantId: assertMerchantId(serverEnv.merchantId()),
+    merchantId: await merchantId(),
   };
   if (input.transactionId) body.transactionId = input.transactionId;
   if (input.userKey) body.userKey = input.userKey;
@@ -321,13 +332,13 @@ export async function refund(
   input: RefundRequest,
 ): Promise<GatewayCall<RefundResponse>> {
   const requestId = newRequestId();
-  const merchantId = assertMerchantId(serverEnv.merchantId());
+  const mid = await merchantId();
   const transactionId = assertTransactionId(input.transactionId);
   const transactionDate = assertTransactionDate(input.transactionDate);
 
   const body: Record<string, unknown> = {
     transactionId,
-    merchantId,
+    merchantId: mid,
     transactionDate,
     type: "WALLETS",
   };
@@ -375,42 +386,42 @@ function signRefund(body: Record<string, unknown>): string {
  * All of MerchantId, OrderId, Amount, ReturnUrl and transactionType=8 are
  * required; an illegal launch renders a 400 page and does not redirect.
  */
-export function jazzCashRegistrationUrl(input: {
+export async function jazzCashRegistrationUrl(input: {
   orderId: string;
   amount: number | string;
   returnUrl: string;
   msisdn?: string;
-}): string {
+}): Promise<string> {
   const params = new URLSearchParams({
-    MerchantId: assertMerchantId(serverEnv.merchantId()),
+    MerchantId: await merchantId(),
     OrderId: assertUserKey(input.orderId),
     Amount: formatAmount(input.amount),
     ReturnUrl: input.returnUrl,
     transactionType: "8",
   });
   if (input.msisdn) params.set("MobileNo", normaliseMsisdn(input.msisdn));
-  return `${endpoint("/jc/registrationfull")}?${params.toString()}`;
+  return `${await endpoint("/jc/registrationfull")}?${params.toString()}`;
 }
 
 /**
  * §4.9 — Hosted Page checkout. Answers 302 to `redirectUrl` with a
  * `status=0037` in most cases; the real outcome comes from hostedInquiry().
  */
-export function hostedCheckoutUrl(input: {
+export async function hostedCheckoutUrl(input: {
   orderId: string;
   amount: number | string;
   redirectUrl: string;
   operatorId?: OperatorId;
-}): string {
+}): Promise<string> {
   const params = new URLSearchParams({
-    merchantId: assertMerchantId(serverEnv.merchantId()),
+    merchantId: await merchantId(),
     key: serverEnv.merchantKey(),
     orderId: assertUserKey(input.orderId),
     amount: formatAmount(input.amount),
     redirectUrl: input.redirectUrl,
   });
   if (input.operatorId) params.set("operator", assertOperatorId(input.operatorId));
-  return `${endpoint("/checkout")}?${params.toString()}`;
+  return `${await endpoint("/checkout")}?${params.toString()}`;
 }
 
 /** §4.9 — poll the hosted-page outcome. Keyed by orderId, not transactionId. */
@@ -421,7 +432,7 @@ export async function hostedInquiry(
   return post<HostedInquiryResponse>(
     "/inquire",
     {
-      merchantId: assertMerchantId(serverEnv.merchantId()),
+      merchantId: await merchantId(),
       orderId: assertUserKey(orderId),
     },
     {

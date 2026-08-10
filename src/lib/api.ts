@@ -5,6 +5,7 @@ import { ZodError } from "zod";
 import { FieldError } from "@/lib/collection/validate";
 import { GatewayUnreachableError } from "@/lib/collection/client";
 import { classify, codeMessage, customerMessage } from "@/lib/collection/codes";
+import { SettingsError } from "@/lib/settings";
 
 export interface ApiOk<T = unknown> {
   ok: true;
@@ -59,6 +60,12 @@ export function handleRouteError(error: unknown) {
   }
   if (error instanceof Error && error.message === "UNAUTHENTICATED") {
     return err("UNAUTHENTICATED", "Please sign in to continue.", 401);
+  }
+  if (error instanceof Error && error.message === "FORBIDDEN") {
+    return err("FORBIDDEN", "You do not have access to this setting.", 403);
+  }
+  if (error instanceof SettingsError) {
+    return err("BAD_SETTING", error.message, 422);
   }
   console.error("[api]", error);
   return err("INTERNAL", "Something went wrong. Please try again.", 500);

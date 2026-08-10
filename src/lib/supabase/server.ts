@@ -50,3 +50,21 @@ export async function requireUser() {
   if (!user) throw new Error("UNAUTHENTICATED");
   return user;
 }
+
+/** True for a profile flagged `is_admin`. Read with the secret key so the
+ *  answer does not depend on the caller being able to see their own row. */
+export async function isAdmin(userId: string) {
+  const { data } = await getSupabaseAdminClient()
+    .from("profiles")
+    .select("is_admin")
+    .eq("id", userId)
+    .maybeSingle();
+  return data?.is_admin === true;
+}
+
+/** Gate for the gateway configuration screen and its write endpoint. */
+export async function requireAdmin() {
+  const user = await requireUser();
+  if (!(await isAdmin(user.id))) throw new Error("FORBIDDEN");
+  return user;
+}

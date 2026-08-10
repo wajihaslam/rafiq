@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       });
       if (error) throw new Error(error.message);
 
-      const url = gateway.jazzCashRegistrationUrl({
+      const url = await gateway.jazzCashRegistrationUrl({
         orderId: orderRef,
         amount: LINK_AMOUNT,
         returnUrl: `${publicEnv.appUrl()}/pay/jc/return`,
