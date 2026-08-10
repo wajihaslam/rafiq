@@ -4,8 +4,7 @@
  * bundle throws at module load rather than silently shipping a merchant key.
  */
 
-function required(name: string): string {
-  const value = process.env[name];
+function demand(name: string, value: string | undefined): string {
   if (!value) {
     throw new Error(
       `Missing environment variable ${name}. Copy .env.example to .env.local and fill it in.`,
@@ -14,15 +13,34 @@ function required(name: string): string {
   return value;
 }
 
+/** Server-side only: `process.env` is a real object here, so a dynamic key works. */
+function required(name: string): string {
+  return demand(name, process.env[name]);
+}
+
 function optional(name: string, fallback: string): string {
   return process.env[name] || fallback;
 }
 
+/**
+ * Public values, readable in the browser.
+ *
+ * Each one MUST be written as a literal `process.env.NEXT_PUBLIC_…` expression.
+ * Next.js inlines these into the client bundle by static analysis at build
+ * time; a computed lookup like `process.env[name]` is invisible to that pass, so
+ * in the browser it resolves against an empty object and every read comes back
+ * undefined. Do not refactor these back through a helper that takes the name.
+ */
 export const publicEnv = {
-  supabaseUrl: () => required("NEXT_PUBLIC_SUPABASE_URL"),
+  supabaseUrl: () =>
+    demand("NEXT_PUBLIC_SUPABASE_URL", process.env.NEXT_PUBLIC_SUPABASE_URL),
   /** Publishable key (`sb_publishable_…`). Safe in the browser; RLS gates it. */
-  supabasePublishableKey: () => required("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"),
-  appUrl: () => optional("NEXT_PUBLIC_APP_URL", "http://localhost:3000"),
+  supabasePublishableKey: () =>
+    demand(
+      "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+    ),
+  appUrl: () => process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
 };
 
 export type CollectionFlow = "otp" | "non_otp";
