@@ -38,7 +38,11 @@ async function run(request: Request) {
   return ok({
     considered: due.length,
     charged: results.filter((r) => r.outcome === "success").length,
-    pending: results.filter((r) => r.outcome === "indeterminate").length,
+    // Counted apart from `pending`: a skipped period was already billed by a
+    // manual charge, so it needs no reconciliation of its own.
+    skipped: results.filter((r) => "skipped" in r && r.skipped).length,
+    pending: results.filter((r) => r.outcome === "indeterminate" && !("skipped" in r && r.skipped))
+      .length,
     failed: results.filter((r) => r.outcome === "failure").length,
     results,
   });

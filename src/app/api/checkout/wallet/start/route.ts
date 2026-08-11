@@ -1,22 +1,18 @@
 /**
  * Starts a cart checkout over a wallet.
  *
- * Three shapes, all handled here because they all consume the same cart:
- *   savedTokenId  → direct-payment, customer absent, settles in one call
- *   OTP flow      → initiate, then the customer posts the OTP to ../verify
- *   Non-OTP flow  → verify with no otp and no transactionId; this *is* the
- *                   payment, so there is no second call
+ * The mechanics live in `@/lib/checkout` — this route only decides *what* is
+ * being paid for (the open cart, priced server-side) and what happens after
+ * (the cart closes so the same lines can't be spent twice).
  */
 
 import { z } from "zod";
 
 import { err, fromGateway, handleRouteError } from "@/lib/api";
 import { closeCart, loadOpenCart } from "@/lib/cart";
-import * as gateway from "@/lib/collection/client";
+import { startPayment, type PayMethod } from "@/lib/checkout";
 import { OPERATORS } from "@/lib/collection/types";
-import { applyOutcome, createOrder, recordTransaction } from "@/lib/orders";
-import { getActiveFlow } from "@/lib/settings";
-import { getSupabaseAdminClient, requireUser } from "@/lib/supabase/server";
+import { requireUser } from "@/lib/supabase/server";
 
 const schema = z
   .object({
@@ -39,179 +35,38 @@ export async function POST(request: Request) {
       return err("EMPTY_CART", "Your cart is empty.", 409);
     }
 
-    // ---- 1-click with a saved token -------------------------------------
-    if (input.savedTokenId) {
-      const admin = getSupabaseAdminClient();
-      const { data: token } = await admin
-        .from("payment_tokens")
-        .select("*")
-        .eq("id", input.savedTokenId)
-        .eq("user_id", user.id)
-        .eq("status", "active")
-        .maybeSingle();
+    const method: PayMethod = input.savedTokenId
+      ? { kind: "saved", savedTokenId: input.savedTokenId }
+      : { kind: "wallet", operatorId: input.operatorId!, msisdn: input.msisdn! };
 
-      if (!token) {
-        return err("0036", "That saved wallet is no longer usable.", 409);
-      }
-
-      const order = await createOrder({
-        userId: user.id,
-        amount: cart.total,
-        channel: "direct_payment",
-        operatorId: token.operator_id,
-        msisdn: token.msisdn,
-        items: cart.items.map(({ product_id, name, qty, unit_price }) => ({
-          product_id,
-          name,
-          qty,
-          unit_price,
-        })),
-      });
-
-      const call = await gateway.directPayment({
-        operatorId: token.operator_id as "100007" | "100008",
-        amount: cart.total,
-        userKey: order.order_ref,
-        sourceId: token.source_id,
-      });
-
-      await recordTransaction({
-        orderId: order.id,
-        userId: user.id,
-        kind: "direct_payment",
-        call,
-        gatewayTransactionId: call.body?.transactionId,
-        operatorId: token.operator_id,
-      });
-
-      // A token that is gone stays gone — reflect that locally so the UI stops
-      // offering it. 0034 is a payload fault, not a dead token, so it's excluded.
-      if (call.code === "0028" || call.code === "0036") {
-        await admin
-          .from("payment_tokens")
-          .update({ status: call.code === "0028" ? "expired" : "delinked" })
-          .eq("id", token.id);
-      }
-
-      const status = await applyOutcome({
-        orderId: order.id,
-        code: call.code,
-        gatewayTransactionId: call.body?.transactionId,
-      });
-      if (status === "paid") await closeCart(cart.cartId);
-
-      return fromGateway(call.code, {
-        orderId: order.id,
-        orderRef: order.order_ref,
-        orderStatus: status,
-        needsOtp: false,
-      });
-    }
-
-    // ---- fresh wallet payment -------------------------------------------
-    const operatorId = input.operatorId!;
-    const msisdn = input.msisdn!;
-    const flow = await getActiveFlow();
-
-    const order = await createOrder({
+    const result = await startPayment({
       userId: user.id,
       amount: cart.total,
-      channel: flow === "otp" ? "wallet_otp" : "wallet_non_otp",
-      operatorId,
-      msisdn,
       items: cart.items.map(({ product_id, name, qty, unit_price }) => ({
         product_id,
         name,
         qty,
         unit_price,
       })),
+      method,
     });
 
-    if (flow === "otp") {
-      const call = await gateway.initiate({
-        operatorId,
-        amount: cart.total,
-        userKey: order.order_ref,
-        msisdn,
-        transactionType: "0",
-      });
-
-      await recordTransaction({
-        orderId: order.id,
-        userId: user.id,
-        kind: "payment",
-        call,
-        gatewayTransactionId: call.body?.transactionId,
-        operatorId,
-      });
-
-      // initiate only creates the transaction; 0000 here means "OTP sent",
-      // not "paid". The order stays pending until verify.
-      if (call.code !== "0000") {
-        const status = await applyOutcome({
-          orderId: order.id,
-          code: call.code,
-          holdSuccess: true,
-        });
-        return fromGateway(call.code, {
-          orderId: order.id,
-          orderRef: order.order_ref,
-          orderStatus: status,
-          needsOtp: false,
-        });
-      }
-
-      // The transactionId must come back on verify or the gateway starts a
-      // *second* transaction — i.e. a double charge. Persist it now.
-      const admin = getSupabaseAdminClient();
-      await admin
-        .from("orders")
-        .update({ status_code: call.code, message: "OTP sent" })
-        .eq("id", order.id);
-
-      return fromGateway(call.code, {
-        orderId: order.id,
-        orderRef: order.order_ref,
-        orderStatus: "pending",
-        needsOtp: true,
-        gatewayTransactionId: call.body?.transactionId ?? null,
-      });
+    if (result.problem) {
+      return err(result.problem.code, result.problem.message, result.problem.status);
     }
 
-    // Non-OTP: verify is the first and only call.
-    const call = await gateway.verify({
-      operatorId,
-      amount: cart.total,
-      userKey: order.order_ref,
-      msisdn,
-      transactionType: "0",
-    });
+    // The cart closes on anything that isn't an outright failure — the gateway
+    // has taken the charge and the customer must not be able to pay it twice.
+    if (result.consumed) await closeCart(cart.cartId);
 
-    await recordTransaction({
-      orderId: order.id,
-      userId: user.id,
-      kind: "payment",
-      call,
-      gatewayTransactionId: call.body?.transactionId,
-      operatorId,
-    });
-
-    // Verify is a payment attempt, not a settlement: a success code holds the
-    // order pending until an inquiry confirms it. The cart still closes — the
-    // gateway accepted the charge and the customer must not pay twice.
-    const status = await applyOutcome({
-      orderId: order.id,
-      code: call.code,
-      gatewayTransactionId: call.body?.transactionId,
-      holdSuccess: true,
-    });
-    if (status !== "failed") await closeCart(cart.cartId);
-
-    return fromGateway(call.code, {
-      orderId: order.id,
-      orderRef: order.order_ref,
-      orderStatus: status,
-      needsOtp: false,
+    return fromGateway(result.code, {
+      orderId: result.orderId,
+      orderRef: result.orderRef,
+      orderStatus: result.orderStatus,
+      needsOtp: result.needsOtp,
+      ...(result.needsOtp
+        ? { gatewayTransactionId: result.gatewayTransactionId ?? null }
+        : {}),
     });
   } catch (error) {
     return handleRouteError(error);

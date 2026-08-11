@@ -35,7 +35,9 @@ export function AddToCartButton({ productId }: { productId: string }) {
 
   return (
     <div className="flex flex-col items-end gap-1">
-      <button type="button" className="btn-primary" disabled={pending} onClick={add}>
+      {/* Secondary to "Pay" — buying several things at once is now the
+          exception, not the default path. */}
+      <button type="button" className="btn-ghost" disabled={pending} onClick={add}>
         {state === "added" ? "Added ✓" : "Add to cart"}
       </button>
       {message && <span className="text-xs text-rose-600">{message}</span>}

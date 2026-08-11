@@ -48,19 +48,26 @@ export async function POST(request: Request) {
       );
     }
 
+    // A subscription is identified by plan *and* wallet: the same plan may run
+    // on Easypaisa and on JazzCash at once, but not twice on one wallet.
     const { data: existing } = await admin
       .from("subscriptions")
       .select("id, status")
       .eq("user_id", user.id)
       .eq("product_id", productId)
+      .eq("payment_token_id", paymentTokenId)
       .maybeSingle();
 
     if (existing && existing.status !== "cancelled") {
-      return err("0005", "You are already subscribed to this plan.", 409);
+      return err(
+        "0005",
+        "You are already subscribed to this plan on this wallet.",
+        409,
+      );
     }
 
     // A previously cancelled subscription is revived rather than duplicated —
-    // (user_id, product_id) is unique.
+    // (user_id, product_id, payment_token_id) is unique.
     const payload = {
       user_id: user.id,
       product_id: productId,
@@ -104,7 +111,9 @@ export async function POST(request: Request) {
       orderId: result.orderId,
       code: result.code,
       outcome: result.outcome,
-      message: customerMessage(result.code),
+      message: result.skipped
+        ? "This period has already been charged."
+        : customerMessage(result.code),
     });
   } catch (error) {
     return handleRouteError(error);
