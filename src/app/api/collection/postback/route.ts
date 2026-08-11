@@ -11,12 +11,46 @@
  */
 
 import { handleRouteError, err, ok } from "@/lib/api";
+import { logApiCall } from "@/lib/api-logs";
 import { classify } from "@/lib/collection/codes";
 import { serverEnv } from "@/lib/env";
 import { applyOutcome } from "@/lib/orders";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 
+/**
+ * Recorded in the API call log as well as in `postbacks`: that table is the
+ * settlement record, this is the HTTP conversation — headers, status and all —
+ * which is what you need when the gateway insists it sent something.
+ *
+ * The body is read once here and handed to the handler, because a request body
+ * is a stream and can only be consumed once.
+ */
 export async function POST(request: Request) {
+  const startedAt = Date.now();
+  const body = await request.text();
+  const response = await handle(request, body);
+
+  await logApiCall({
+    direction: "inbound",
+    label: "collection.postback",
+    method: "POST",
+    url: request.url,
+    requestHeaders: request.headers,
+    requestBody: body,
+    // Cloned so the body the caller receives is still unread.
+    responseBody: await response
+      .clone()
+      .text()
+      .catch(() => null),
+    statusCode: response.status,
+    outcome: response.ok ? "success" : "failure",
+    durationMs: Date.now() - startedAt,
+  });
+
+  return response;
+}
+
+async function handle(request: Request, body: string): Promise<Response> {
   const admin = getSupabaseAdminClient();
   let postbackId: string | null = null;
 
@@ -31,7 +65,7 @@ export async function POST(request: Request) {
       return err("UNAUTHORIZED", "Not authorised.", 401);
     }
 
-    const payload = (await request.json()) as Record<string, unknown>;
+    const payload = JSON.parse(body) as Record<string, unknown>;
 
     const { data: stored } = await admin
       .from("postbacks")

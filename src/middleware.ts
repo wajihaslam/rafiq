@@ -8,7 +8,7 @@ import { publicEnv } from "@/lib/env";
  * renders for signed-out visitors, swapping the subscribe control for a sign-in
  * link. The API routes behind it still require a user.
  */
-const PROTECTED = ["/cart", "/checkout", "/orders", "/wallets", "/settings"];
+const PROTECTED = ["/cart", "/checkout", "/orders", "/wallets", "/settings", "/logs"];
 
 /**
  * Refreshes the Supabase session cookie on every request — Server Components
@@ -52,7 +52,10 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    // everything except static assets and the gateway-facing postback
-    "/((?!_next/static|_next/image|favicon.ico|api/collection/postback|api/cron|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    // Everything except static assets and the endpoints that outside systems
+    // call: the gateway postback, the cron, and the webhook catcher. Those have
+    // no session to refresh, and running this would only add a Supabase round
+    // trip to a request that must stay cheap to be safe to hammer.
+    "/((?!_next/static|_next/image|favicon.ico|api/collection/postback|api/cron|api/webhooks|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
