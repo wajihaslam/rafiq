@@ -94,7 +94,19 @@ export default async function SubscriptionsPage() {
                 Sign in to subscribe
               </Link>
             ) : subscribedProductIds.has(plan.id) ? (
-              <p className="text-sm text-emerald-600">You&apos;re subscribed.</p>
+              // Saying "subscribed" without offering the way out is a dead end;
+              // the controls live in the panel at the top of this page.
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-emerald-600">
+                  You&apos;re subscribed.
+                </p>
+                <Link
+                  href="#your-subscriptions"
+                  className="text-sm text-slate-500 hover:underline"
+                >
+                  Manage or unsubscribe
+                </Link>
+              </div>
             ) : (
               <SubscribeButton
                 productId={plan.id}

@@ -28,21 +28,47 @@ const STATUS_COPY: Record<SubStatus, string> = {
 export function MySubscriptions({ subscriptions }: { subscriptions: Row[] }) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
+  /** Unsubscribing is irreversible, so it asks once before doing it. */
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   async function act(id: string, action: "pause" | "resume" | "cancel") {
     setBusy(id);
-    await fetch(`/api/subscriptions/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
-    });
-    setBusy(null);
-    router.refresh();
+    setError(null);
+    try {
+      const response = await fetch(`/api/subscriptions/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const payload = await response.json();
+      // Previously the response was thrown away, so a failed cancel looked
+      // exactly like a successful one until the page came back unchanged.
+      if (!payload.ok) {
+        setError(payload.message ?? "That didn't work. Please try again.");
+        return;
+      }
+      setConfirming(null);
+      router.refresh();
+    } catch {
+      setError("We couldn't reach the server. Please try again.");
+    } finally {
+      setBusy(null);
+    }
   }
 
   return (
-    <section className="space-y-2">
+    <section id="your-subscriptions" className="scroll-mt-4 space-y-2">
       <h2 className="font-medium">Your subscriptions</h2>
+      <p className="text-sm text-slate-500">
+        Pause stops the next charge and keeps the plan. Unsubscribe ends it for
+        good — the saved wallet stays linked either way.
+      </p>
+      {error && (
+        <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:bg-rose-500/10 dark:text-rose-300">
+          {error}
+        </p>
+      )}
       <ul className="divide-y divide-slate-200 rounded-xl border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
         {subscriptions.map((sub) => (
           <li key={sub.id} className="flex flex-wrap items-center gap-4 p-4">
@@ -82,14 +108,39 @@ export function MySubscriptions({ subscriptions }: { subscriptions: Row[] }) {
                   Resume
                 </button>
               )}
-              <button
-                type="button"
-                className="text-sm text-slate-400 hover:text-rose-600"
-                disabled={busy === sub.id}
-                onClick={() => act(sub.id, "cancel")}
-              >
-                Cancel
-              </button>
+              {confirming === sub.id ? (
+                <span className="flex items-center gap-2">
+                  <span className="text-sm text-slate-500">Are you sure?</span>
+                  <button
+                    type="button"
+                    className="btn-ghost text-rose-600"
+                    disabled={busy === sub.id}
+                    onClick={() => act(sub.id, "cancel")}
+                  >
+                    {busy === sub.id ? "Unsubscribing…" : "Yes, unsubscribe"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    disabled={busy === sub.id}
+                    onClick={() => setConfirming(null)}
+                  >
+                    Keep it
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-ghost text-rose-600"
+                  disabled={busy === sub.id}
+                  onClick={() => {
+                    setError(null);
+                    setConfirming(sub.id);
+                  }}
+                >
+                  Unsubscribe
+                </button>
+              )}
             </div>
           </li>
         ))}

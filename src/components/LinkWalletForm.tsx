@@ -94,7 +94,42 @@ export function LinkWalletForm() {
 
   return (
     <section className="card space-y-4">
-      <h2 className="font-medium">Link a new wallet</h2>
+      <div>
+        <h2 className="font-medium">Link a new wallet</h2>
+        {/* Tokenization is two steps and always OTP-verified, whatever flow the
+            payment merchant is on — so the step count is fixed and can be
+            stated up front rather than discovered. */}
+        <p className="mt-1 text-sm text-slate-500">
+          {orderRef
+            ? "Step 2 of 2 — confirm the OTP to finish linking."
+            : "Step 1 of 2 — we'll send an OTP to approve the link."}{" "}
+          Linking saves your consent once so later charges need no OTP. It does
+          not move any money.
+        </p>
+      </div>
+
+      <ol className="flex gap-2 text-xs">
+        {[
+          { n: 1, label: "Wallet details" },
+          { n: 2, label: "Confirm OTP" },
+        ].map((step) => {
+          const current = orderRef ? 2 : 1;
+          const state =
+            step.n === current
+              ? "border-brand-500 text-brand-600 font-medium"
+              : step.n < current
+                ? "border-emerald-500 text-emerald-600"
+                : "border-slate-200 text-slate-400 dark:border-slate-800";
+          return (
+            <li
+              key={step.n}
+              className={`flex-1 rounded-lg border px-3 py-2 ${state}`}
+            >
+              {step.n < current ? "✓" : step.n}. {step.label}
+            </li>
+          );
+        })}
+      </ol>
 
       {notice && (
         <p
@@ -124,14 +159,30 @@ export function LinkWalletForm() {
               placeholder="1234"
             />
           </div>
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={busy || otp.length < 4}
-            onClick={confirm}
-          >
-            {busy ? "Linking…" : "Confirm and link"}
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={busy || otp.length < 4}
+              onClick={confirm}
+            >
+              {busy ? "Linking…" : "Confirm and link"}
+            </button>
+            {/* Without this, a customer who mistyped their number on step 1 is
+                stuck on a step they cannot complete. */}
+            <button
+              type="button"
+              className="text-sm text-slate-500 hover:underline"
+              disabled={busy}
+              onClick={() => {
+                setOrderRef(null);
+                setOtp("");
+                setNotice(null);
+              }}
+            >
+              Start over
+            </button>
+          </div>
         </>
       ) : (
         <>
