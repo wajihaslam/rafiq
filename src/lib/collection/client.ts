@@ -14,8 +14,9 @@
 import "server-only";
 import { createHmac } from "node:crypto";
 
+import { logApiCall, type ApiLogInput } from "@/lib/api-logs";
 import { serverEnv } from "@/lib/env";
-import { getGatewayConfig } from "@/lib/settings";
+import { getBaseUrl, getGatewayConfig, type MerchantRole } from "@/lib/settings";
 import { classify, type Outcome } from "./codes";
 import {
   assertMerchantId,
@@ -71,14 +72,44 @@ export class GatewayUnreachableError extends Error {
  * Base URL and merchant id are resolved per call, not at module load: both are
  * runtime-configurable from /settings (falling back to the environment), so
  * reading them once would pin the process to whatever was set at boot.
+ *
+ * The configured base URL is used **verbatim** — it already includes the
+ * gateway prefix, so `http://host:8001/mock/collection` plus
+ * `/v2/wallets/transaction/verify` is the whole URL. Nothing is inserted
+ * between the two. Adding a prefix here as well is what produced
+ * `/mock/collection/mock/collection/v2/…`; every `path` below therefore starts
+ * at the version segment (`/v2`, `/v3`) or at the hosted route (`/checkout`,
+ * `/inquire`, `/jc/…`).
  */
 async function endpoint(path: string): Promise<string> {
-  const { baseUrl } = await getGatewayConfig();
-  return `${baseUrl}${serverEnv.collectionPrefix()}${path}`;
+  return `${await getBaseUrl()}${path}`;
 }
 
-async function merchantId(): Promise<string> {
-  return assertMerchantId((await getGatewayConfig()).merchantId);
+/**
+ * The merchant to send, chosen by what the call *does* rather than by a global
+ * setting. Three MIDs are configured and each is provisioned for one job:
+ *
+ *  - `payment`      — the active flow's merchant (OTP or Non-OTP).
+ *  - `tokenization` — the tokenization merchant, for every call that mints,
+ *    charges or retires a stored token, whatever the payment flow is set to.
+ *
+ * Getting this wrong is not a soft failure: a `sourceId` belongs to the
+ * merchant that minted it, so charging a token under the payment MID answers
+ * 0003, and running a payment under a MID provisioned for the other flow
+ * answers 0015.
+ */
+async function merchantId(role: MerchantRole = "payment"): Promise<string> {
+  return assertMerchantId((await getGatewayConfig(role)).merchantId);
+}
+
+/**
+ * transactionType "8" *is* tokenization — it is the field that tells the
+ * gateway to mint a `sourceId`. Deriving the role from it rather than from a
+ * parameter means initiate and verify cannot be called with the wrong merchant
+ * for the transaction type they are carrying.
+ */
+function roleForTransactionType(transactionType: string): MerchantRole {
+  return transactionType === "8" ? "tokenization" : "payment";
 }
 
 /**
@@ -98,15 +129,41 @@ function walletHeaders(operatorId: OperatorId, requestId: string, version?: stri
   };
 }
 
+/**
+ * `/v2/wallets/transaction/initiate` → `collection.initiate`. Derived rather
+ * than passed so a new endpoint cannot be added without a label.
+ */
+function labelFor(path: string): string {
+  return `collection.${path.split("/").filter(Boolean).pop() ?? "call"}`;
+}
+
 async function post<T>(
   path: string,
   body: Record<string, unknown>,
   headers: Record<string, string>,
   requestId: string,
 ): Promise<GatewayCall<T>> {
+  const url = await endpoint(path);
+  const label = labelFor(path);
+  const startedAt = Date.now();
+
+  /** Every exit from this function goes through here first. */
+  const record = (fields: Partial<ApiLogInput>) =>
+    logApiCall({
+      direction: "outbound",
+      label,
+      method: "POST",
+      url,
+      requestHeaders: headers,
+      requestBody: body,
+      requestId,
+      durationMs: Date.now() - startedAt,
+      ...fields,
+    });
+
   let response: Response;
   try {
-    response = await fetch(await endpoint(path), {
+    response = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -114,6 +171,7 @@ async function post<T>(
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (cause) {
+    await record({ error: String(cause), outcome: "indeterminate" });
     throw new GatewayUnreachableError(path, cause);
   }
 
@@ -122,6 +180,13 @@ async function post<T>(
   try {
     parsed = JSON.parse(text);
   } catch {
+    await record({
+      statusCode: response.status,
+      responseHeaders: response.headers,
+      responseBody: text,
+      outcome: "indeterminate",
+      error: `non-JSON body (HTTP ${response.status})`,
+    });
     throw new GatewayUnreachableError(
       path,
       new Error(`HTTP ${response.status}, non-JSON body: ${text.slice(0, 200)}`),
@@ -134,11 +199,26 @@ async function post<T>(
   const code = typeof asRecord.status === "string" ? asRecord.status : undefined;
 
   if (!response.ok && !code) {
+    await record({
+      statusCode: response.status,
+      responseHeaders: response.headers,
+      responseBody: parsed,
+      outcome: "indeterminate",
+      error: `HTTP ${response.status} with no status code in the body`,
+    });
     throw new GatewayUnreachableError(
       path,
       new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`),
     );
   }
+
+  await record({
+    statusCode: response.status,
+    responseHeaders: response.headers,
+    responseBody: parsed,
+    gatewayCode: code ?? null,
+    outcome: classify(code),
+  });
 
   return {
     body: parsed as T,
@@ -167,13 +247,14 @@ export async function initiate(
 ): Promise<GatewayCall<WalletResponse>> {
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
+  const transactionType = assertTransactionType(input.transactionType);
   const body = {
-    merchantId: await merchantId(),
+    merchantId: await merchantId(roleForTransactionType(transactionType)),
     operatorId,
     amount: formatAmount(input.amount),
     userKey: assertUserKey(input.userKey),
     msisdn: normaliseMsisdn(input.msisdn),
-    transactionType: assertTransactionType(input.transactionType),
+    transactionType,
   };
   return post<WalletResponse>(
     "/v2/wallets/transaction/initiate",
@@ -196,13 +277,16 @@ export async function verify(
 ): Promise<GatewayCall<WalletResponse>> {
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
+  const transactionType = assertTransactionType(input.transactionType);
   const body: Record<string, unknown> = {
-    merchantId: await merchantId(),
+    // Same merchant initiate used, because the same field decides it — a
+    // verify that continues an initiate must not switch MID mid-transaction.
+    merchantId: await merchantId(roleForTransactionType(transactionType)),
     operatorId,
     amount: formatAmount(input.amount),
     userKey: assertUserKey(input.userKey),
     msisdn: normaliseMsisdn(input.msisdn),
-    transactionType: assertTransactionType(input.transactionType),
+    transactionType,
   };
   if (input.transactionId) body.transactionId = input.transactionId;
   if (input.otp) body.otp = input.otp;
@@ -219,6 +303,9 @@ export async function verify(
  * §4.4 — redeems a JazzCash hosted registration for a `sourceId`.
  * Idempotent per orderId: re-finalizing returns the same token, so a missed
  * redirect is safe to retry.
+ *
+ * Tokenization merchant: it mints a token, and must match the MID the
+ * registration was launched under.
  */
 export async function finalize(
   input: FinalizeRequest,
@@ -226,7 +313,7 @@ export async function finalize(
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
   const body = {
-    merchantId: await merchantId(),
+    merchantId: await merchantId("tokenization"),
     operatorId,
     orderId: assertUserKey(input.orderId),
     msisdn: normaliseMsisdn(input.msisdn),
@@ -243,6 +330,10 @@ export async function finalize(
  * §4.5 — charges a stored token with the customer absent. This is 1-click
  * checkout and the engine behind subscription renewals.
  *
+ * Tokenization merchant even though this moves money: the `sourceId` belongs to
+ * the merchant that minted it, so charging it under the payment MID answers
+ * 0003 no matter which flow is live.
+ *
  * `versionOverride` exists only for driving §7 fixtures in tests; normal
  * traffic must leave it unset.
  */
@@ -253,7 +344,7 @@ export async function directPayment(
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
   const body = {
-    merchantId: await merchantId(),
+    merchantId: await merchantId("tokenization"),
     operatorId,
     transactionType: "8" as const,
     amount: formatAmount(input.amount),
@@ -269,14 +360,17 @@ export async function directPayment(
   );
 }
 
-/** §4.6 — retires a token. Charging it afterwards answers 0028. */
+/**
+ * §4.6 — retires a token. Charging it afterwards answers 0028.
+ * Tokenization merchant, for the same reason direct-payment uses it.
+ */
 export async function delink(
   input: DelinkRequest,
 ): Promise<GatewayCall<WalletResponse>> {
   const requestId = newRequestId();
   const operatorId = assertOperatorId(input.operatorId);
   const body = {
-    merchantId: await merchantId(),
+    merchantId: await merchantId("tokenization"),
     operatorId,
     sourceId: assertSourceId(input.sourceId),
   };
@@ -292,16 +386,25 @@ export async function delink(
  * §4.7 — reads a transaction's live status. This is how an indeterminate
  * response gets resolved. Note the code lives at `transaction.status`, not at
  * the top level, so it is lifted here.
+ *
+ * An inquiry must carry **the merchant that made the original call** — a
+ * transaction is only visible to the MID that created it, so asking under a
+ * different one answers 0090 No-Transaction-Found, which reads exactly like a
+ * payment that never happened. Callers therefore pass the MID recorded on the
+ * transaction they are resolving; `role` is the fallback for a call with no
+ * recorded merchant to go back to.
  */
 export async function inquiry(
-  input: InquiryRequest,
+  input: InquiryRequest & { merchantId?: string; role?: MerchantRole },
 ): Promise<GatewayCall<InquiryResponse>> {
   const requestId = newRequestId();
   if (!input.transactionId && !input.userKey) {
     throw new Error("inquiry requires transactionId or userKey");
   }
   const body: Record<string, unknown> = {
-    merchantId: await merchantId(),
+    merchantId: input.merchantId
+      ? assertMerchantId(input.merchantId)
+      : await merchantId(input.role ?? "payment"),
   };
   if (input.transactionId) body.transactionId = input.transactionId;
   if (input.userKey) body.userKey = input.userKey;
@@ -327,12 +430,18 @@ export async function inquiry(
 /**
  * §4.8 — refunds a settled transaction. Success is **0135**, not 0000, and the
  * order moves to RefundSubmitted until the postback confirms it.
+ *
+ * Like inquiry, this has to name the merchant that took the money — refunding a
+ * direct-payment means the tokenization MID, not the payment one — so the
+ * caller passes the MID recorded on the original transaction where it has it.
  */
 export async function refund(
-  input: RefundRequest,
+  input: RefundRequest & { merchantId?: string; role?: MerchantRole },
 ): Promise<GatewayCall<RefundResponse>> {
   const requestId = newRequestId();
-  const mid = await merchantId();
+  const mid = input.merchantId
+    ? assertMerchantId(input.merchantId)
+    : await merchantId(input.role ?? "payment");
   const transactionId = assertTransactionId(input.transactionId);
   const transactionDate = assertTransactionDate(input.transactionDate);
 
@@ -385,6 +494,9 @@ function signRefund(body: Record<string, unknown>): string {
  * §4.3 — JazzCash wallet linking. Returns a URL to redirect the browser to.
  * All of MerchantId, OrderId, Amount, ReturnUrl and transactionType=8 are
  * required; an illegal launch renders a 400 page and does not redirect.
+ *
+ * Tokenization merchant — transactionType=8 — and `finalize` redeems the result
+ * under the same one.
  */
 export async function jazzCashRegistrationUrl(input: {
   orderId: string;
@@ -393,19 +505,20 @@ export async function jazzCashRegistrationUrl(input: {
   msisdn?: string;
 }): Promise<string> {
   const params = new URLSearchParams({
-    MerchantId: await merchantId(),
+    MerchantId: await merchantId("tokenization"),
     OrderId: assertUserKey(input.orderId),
     Amount: formatAmount(input.amount),
     ReturnUrl: input.returnUrl,
     transactionType: "8",
   });
   if (input.msisdn) params.set("MobileNo", normaliseMsisdn(input.msisdn));
-  return `${await endpoint("/jc/registrationfull")}?${params.toString()}`;
+  return handoff("collection.jc.registration", await endpoint("/jc/registrationfull"), params);
 }
 
 /**
  * §4.9 — Hosted Page checkout. Answers 302 to `redirectUrl` with a
  * `status=0037` in most cases; the real outcome comes from hostedInquiry().
+ * Payment merchant, and `hostedInquiry` reads the result back under the same.
  */
 export async function hostedCheckoutUrl(input: {
   orderId: string;
@@ -414,25 +527,60 @@ export async function hostedCheckoutUrl(input: {
   operatorId?: OperatorId;
 }): Promise<string> {
   const params = new URLSearchParams({
-    merchantId: await merchantId(),
+    merchantId: await merchantId("payment"),
     key: serverEnv.merchantKey(),
     orderId: assertUserKey(input.orderId),
     amount: formatAmount(input.amount),
     redirectUrl: input.redirectUrl,
   });
   if (input.operatorId) params.set("operator", assertOperatorId(input.operatorId));
-  return `${await endpoint("/checkout")}?${params.toString()}`;
+  return handoff("collection.checkout", await endpoint("/checkout"), params);
 }
 
-/** §4.9 — poll the hosted-page outcome. Keyed by orderId, not transactionId. */
+/**
+ * Records a browser hand-off and returns the URL to redirect to.
+ *
+ * These are gateway calls we never see the response to — the customer's browser
+ * makes them — so the log line is the request only, and the outcome arrives
+ * later as its own row from the return-URL inquiry or the postback. Logging
+ * them anyway is the point: without it, the trail for a hosted payment starts
+ * mid-conversation.
+ */
+async function handoff(
+  label: string,
+  base: string,
+  params: URLSearchParams,
+): Promise<string> {
+  const url = `${base}?${params.toString()}`;
+  await logApiCall({
+    direction: "outbound",
+    label,
+    method: "GET",
+    // The query carries the merchant key on /checkout, so log the parameters as
+    // a body — which is redacted — and keep the URL itself bare.
+    url: base,
+    requestBody: Object.fromEntries(params),
+    outcome: "pending",
+  });
+  return url;
+}
+
+/**
+ * §4.9 — poll the hosted-page outcome. Keyed by orderId, not transactionId.
+ *
+ * Must name the merchant the checkout was launched under, or the gateway has
+ * no such order to report on. `merchantId` overrides for an order launched
+ * before the configuration changed.
+ */
 export async function hostedInquiry(
   orderId: string,
+  override?: string,
 ): Promise<GatewayCall<HostedInquiryResponse>> {
   const requestId = newRequestId();
   return post<HostedInquiryResponse>(
     "/inquire",
     {
-      merchantId: await merchantId(),
+      merchantId: override ? assertMerchantId(override) : await merchantId("payment"),
       orderId: assertUserKey(orderId),
     },
     {

@@ -55,10 +55,33 @@ export const serverEnv = {
    * variable is a normal state and must not throw — the caller reports a
    * missing value against the settings page instead. See `@/lib/settings`.
    */
+  /**
+   * The full base URL **including** the gateway prefix, e.g.
+   * `http://3.127.43.66:8001/mock/collection`. Endpoint paths are appended to
+   * it exactly as written, starting at `/v2`, `/v3` or the hosted route.
+   */
   collectionBaseUrl: (): string | undefined =>
     process.env.COLLECTION_BASE_URL?.trim().replace(/\/+$/, "") || undefined,
-  merchantId: (): string | undefined =>
-    process.env.COLLECTION_MERCHANT_ID?.trim() || undefined,
+  /**
+   * The merchant provisioned for a given job. A MID belongs to exactly one, so
+   * they are separate variables.
+   *
+   * `COLLECTION_MERCHANT_ID` remains as a legacy fallback for the two payment
+   * slots — the behaviour it always had when there was only one of it. It is
+   * deliberately *not* a fallback for tokenization: a token minted under one
+   * merchant cannot be charged under another, so inheriting the payment MID
+   * there would mint tokens that later answer 0003.
+   */
+  merchantIdFor: (slot: "otp" | "non_otp" | "tokenization"): string | undefined => {
+    if (slot === "tokenization") {
+      return process.env.COLLECTION_MERCHANT_ID_TOKENIZATION?.trim() || undefined;
+    }
+    const perFlow =
+      slot === "otp"
+        ? process.env.COLLECTION_MERCHANT_ID_OTP
+        : process.env.COLLECTION_MERCHANT_ID_NON_OTP;
+    return perFlow?.trim() || process.env.COLLECTION_MERCHANT_ID?.trim() || undefined;
+  },
   /**
    * Which sequence the MID is provisioned on. Calling the other flow's sequence
    * answers 0015 Invalid-Flow, so this is not a preference — it must match how
@@ -71,8 +94,6 @@ export const serverEnv = {
     return undefined;
   },
 
-  collectionPrefix: () =>
-    optional("COLLECTION_GATEWAY_PREFIX", "/mock/collection").replace(/\/+$/, ""),
   merchantKey: () => required("COLLECTION_MERCHANT_KEY"),
   refundSigningSecret: () => required("COLLECTION_REFUND_SIGNING_SECRET"),
 
