@@ -13,6 +13,11 @@ import { applyOutcome, createOrder, recordTransaction } from "@/lib/orders";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import type { Subscription } from "@/lib/db-types";
 
+/** PostgREST surfaces a unique-constraint breach as SQLSTATE 23505. */
+function isUniqueViolation(error: { code?: string; message?: string }): boolean {
+  return error.code === "23505" || Boolean(error.message?.includes("duplicate key"));
+}
+
 /** Give up on a subscription after this many consecutive failed renewals. */
 const MAX_FAILED_ATTEMPTS = 3;
 
@@ -21,6 +26,12 @@ export interface ChargeResult {
   orderId: string | null;
   code: string;
   outcome: "success" | "failure" | "indeterminate";
+  /**
+   * True when this period had already been charged and we stopped before
+   * calling the gateway. Not a failure — the money is already on its way — so
+   * callers must not mark the subscription past-due on it.
+   */
+  skipped?: boolean;
 }
 
 /**
@@ -65,11 +76,27 @@ export async function chargeSubscription(sub: Subscription): Promise<ChargeResul
     ],
   });
 
-  await admin.from("subscription_charges").insert({
+  // The period is unique per subscription, so this insert is the lock that
+  // stops a manual "Pay now" and the scheduler from billing the same period
+  // twice. It runs *before* the gateway call: losing the race costs an unused
+  // order row, which is far cheaper than a duplicate charge.
+  const { error: claimError } = await admin.from("subscription_charges").insert({
     subscription_id: sub.id,
     order_id: order.id,
     period_start: periodStart.toISOString(),
   });
+
+  if (claimError) {
+    if (!isUniqueViolation(claimError)) throw new Error(claimError.message);
+    await admin.from("orders").delete().eq("id", order.id);
+    return {
+      subscriptionId: sub.id,
+      orderId: null,
+      code: "0005",
+      outcome: "indeterminate",
+      skipped: true,
+    };
+  }
 
   let code: string;
   let gatewayTransactionId: string | null | undefined;

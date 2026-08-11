@@ -1,13 +1,11 @@
 /**
- * Completes an OTP-flow cart payment. The verify mechanics — including reading
- * the transactionId back from our own audit trail rather than the request —
- * live in `@/lib/checkout`; here we only close the cart afterwards.
+ * Completes the OTP step of a direct product payment. There is no cart to
+ * close here — the order stands on its own.
  */
 
 import { z } from "zod";
 
 import { err, fromGateway, handleRouteError } from "@/lib/api";
-import { closeCart, loadOpenCart } from "@/lib/cart";
 import { verifyOtpPayment } from "@/lib/checkout";
 import { requireUser } from "@/lib/supabase/server";
 
@@ -24,11 +22,6 @@ export async function POST(request: Request) {
     const result = await verifyOtpPayment({ userId: user.id, orderId, otp });
     if (result.problem) {
       return err(result.problem.code, result.problem.message, result.problem.status);
-    }
-
-    if (result.consumed) {
-      const cart = await loadOpenCart(user.id);
-      if (cart) await closeCart(cart.cartId);
     }
 
     return fromGateway(result.code, {
