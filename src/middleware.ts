@@ -18,9 +18,29 @@ const PROTECTED = ["/cart", "/checkout", "/orders", "/wallets", "/settings", "/l
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request });
 
+  /**
+   * A missing NEXT_PUBLIC_* value used to throw here, and a throw in middleware
+   * is a 500 on *every* path the matcher covers — one unset variable took the
+   * whole site down with MIDDLEWARE_INVOCATION_FAILED, including pages that
+   * need no session at all.
+   *
+   * Degrading is safe because middleware is not the access control: every
+   * protected page and route calls `requireUser()`, which fails closed on its
+   * own. Skipping the refresh costs a redirect, not a door left open.
+   */
+  let supabaseUrl: string;
+  let supabaseKey: string;
+  try {
+    supabaseUrl = publicEnv.supabaseUrl();
+    supabaseKey = publicEnv.supabasePublishableKey();
+  } catch (error) {
+    console.error("[middleware] Supabase env missing, skipping session refresh", error);
+    return response;
+  }
+
   const supabase = createServerClient(
-    publicEnv.supabaseUrl(),
-    publicEnv.supabasePublishableKey(),
+    supabaseUrl,
+    supabaseKey,
     {
       cookies: {
         getAll: () => request.cookies.getAll(),
@@ -35,9 +55,18 @@ export async function middleware(request: NextRequest) {
     },
   );
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Same reasoning as above: an unreachable auth host must not 500 the site.
+  // Treating the caller as signed out sends them to /login, which is the honest
+  // answer when we cannot confirm a session — and `requireUser()` still guards
+  // the data either way.
+  let user: Awaited<ReturnType<typeof supabase.auth.getUser>>["data"]["user"] = null;
+  try {
+    ({
+      data: { user },
+    } = await supabase.auth.getUser());
+  } catch (error) {
+    console.error("[middleware] session refresh failed", error);
+  }
 
   const { pathname } = request.nextUrl;
   if (!user && PROTECTED.some((p) => pathname.startsWith(p))) {
