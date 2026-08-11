@@ -280,7 +280,6 @@ create policy subscription_charges_read on subscription_charges
 
 -- postbacks: service role only. No policy = no client access.
 
-
 -- >>> migrations/0002_gateway_settings.sql
 
 -- ===========================================================================
@@ -329,6 +328,189 @@ create policy gateway_settings_read_admin on gateway_settings
 -- show; every column falls back to the environment until someone fills it in.
 insert into gateway_settings (id) values (true) on conflict (id) do nothing;
 
+-- >>> migrations/0003_api_logs.sql
+
+-- ===========================================================================
+-- Rafiq — API call log
+--
+-- Every HTTP conversation this app takes part in, in one table:
+--   'outbound' — a call we made to the Collection gateway
+--   'inbound'  — a call something made to us (the webhook catcher, postbacks)
+--
+-- This is a diagnostic trail, not an audit trail: `transactions` remains the
+-- record of what happened to money. Logging is therefore best-effort and must
+-- never fail a payment — see `@/lib/api-logs`.
+-- ===========================================================================
+
+create type api_log_direction as enum ('outbound', 'inbound');
+
+create table api_logs (
+  id               uuid primary key default gen_random_uuid(),
+
+  direction        api_log_direction not null,
+  -- Short operation name, e.g. 'collection.initiate' or 'webhook.catch'.
+  -- Grouping by this is the fastest way to answer "is delink broken?".
+  label            text not null,
+
+  method           text not null,
+  url              text not null,
+
+  -- Headers and bodies are stored redacted; see REDACTED_KEYS in the library.
+  -- A body that is not JSON is wrapped as {"raw": "..."} so the column stays
+  -- jsonb and the viewer has exactly one shape to render.
+  request_headers  jsonb,
+  request_body     jsonb,
+  response_headers jsonb,
+  response_body    jsonb,
+
+  -- HTTP status. Null when the request never completed (see `error`).
+  status_code      int,
+  -- The gateway's own code from the body (`status`), which is where the real
+  -- outcome lives — wallet endpoints answer HTTP 200 even when they decline.
+  gateway_code     text,
+  -- classify(gateway_code): 'success' | 'failure' | 'pending' | 'indeterminate'
+  outcome          text,
+
+  -- The Request-Id header we sent, so a log line can be quoted to the gateway.
+  request_id       text,
+  duration_ms      int,
+  -- Transport failure or handler exception. Present iff the call did not
+  -- produce a usable response.
+  error            text,
+
+  -- Who triggered it, when there was a session. Null for cron and webhooks.
+  user_id          uuid references auth.users(id) on delete set null,
+
+  created_at       timestamptz not null default now()
+);
+
+-- The viewer is "newest first, optionally filtered"; these cover both.
+create index api_logs_created_at_idx on api_logs (created_at desc);
+create index api_logs_direction_idx  on api_logs (direction, created_at desc);
+create index api_logs_label_idx      on api_logs (label, created_at desc);
+
+alter table api_logs enable row level security;
+
+-- Admins only: request bodies carry msisdns and source tokens. Writes go
+-- through the service role, so there is deliberately no insert policy.
+create policy api_logs_read_admin on api_logs
+  for select using (
+    exists (select 1 from profiles p where p.id = auth.uid() and p.is_admin)
+  );
+
+-- ---------------------------------------------------------------------------
+-- Default the Payment API base URL, so a fresh install points somewhere real
+-- instead of refusing every call. Overridable from /settings at any time.
+-- ---------------------------------------------------------------------------
+update gateway_settings
+   set base_url = 'http://3.127.43.66:8001'
+ where id and base_url is null;
+
+-- >>> migrations/0004_base_url_includes_prefix.sql
+
+-- ===========================================================================
+-- Rafiq — the base URL now carries the gateway prefix
+--
+-- `gateway_settings.base_url` used to be the origin alone, with the client
+-- appending COLLECTION_GATEWAY_PREFIX ('/mock/collection') to it. The client
+-- now appends the endpoint path verbatim instead, starting at the version
+-- segment, so the prefix has to live in the stored value.
+--
+-- Storing the whole thing is what makes the setting honest: what you see on
+-- /settings is what a request is addressed to, with nothing spliced in behind
+-- your back. The previous split produced
+-- '/mock/collection/mock/collection/v2/…' the moment someone pasted the URL
+-- they had actually been given.
+--
+-- Both statements are idempotent, so this is safe to re-run.
+-- ===========================================================================
+
+-- 1. Repair a value that already had the prefix doubled by the old client.
+update gateway_settings
+   set base_url = replace(base_url, '/mock/collection/mock/collection',
+                                    '/mock/collection')
+ where id and base_url like '%/mock/collection/mock/collection%';
+
+-- 2. Add the prefix to a bare origin — including the one migration 0003
+--    seeded. A base URL that already carries a path is left alone: it points
+--    at a gateway with a different prefix, which is now expressible.
+update gateway_settings
+   set base_url = rtrim(base_url, '/') || '/mock/collection'
+ where id
+   and base_url is not null
+   -- no path beyond the origin: 'scheme://host[:port]' and nothing more
+   and base_url ~ '^https?://[^/]+/?$';
+
+-- >>> migrations/0005_two_merchants.sql
+
+-- ===========================================================================
+-- Rafiq — one merchant per flow, with a switch
+--
+-- A MID is provisioned on exactly one flow: calling the other one's sequence
+-- answers 0015 Invalid-Flow. Testing both therefore meant retyping the merchant
+-- id every time the flow changed, and a half-done switch — new flow, old MID —
+-- is a configuration that looks fine and fails every call.
+--
+-- So both merchants are stored side by side and `flow` becomes the switch that
+-- says which of them is live. The pair moves together or not at all, and the
+-- invalid combination is no longer expressible.
+-- ===========================================================================
+
+alter table gateway_settings
+  add column merchant_id_otp text
+    check (merchant_id_otp is null or merchant_id_otp ~ '^\d{7}$'),
+  add column merchant_id_non_otp text
+    check (merchant_id_non_otp is null or merchant_id_non_otp ~ '^\d{7}$');
+
+-- Move the existing merchant into the slot its recorded flow names.
+update gateway_settings
+   set merchant_id_otp = merchant_id
+ where id and flow = 'otp' and merchant_id is not null;
+
+update gateway_settings
+   set merchant_id_non_otp = merchant_id
+ where id and flow = 'non_otp' and merchant_id is not null;
+
+-- A merchant id stored with no flow is deliberately NOT migrated: which
+-- sequence it was provisioned on is exactly the thing that is unknown, and
+-- guessing would send half of all merchants down the wrong one. That state
+-- already blocked payments (`getGatewayConfig` refuses on a missing flow), so
+-- nothing that worked stops working — an admin re-enters it under the right
+-- heading.
+
+-- `flow` now means "which merchant is live", so a single `merchant_id` would be
+-- a second, contradictable answer to the same question.
+alter table gateway_settings drop column merchant_id;
+
+-- >>> migrations/0006_tokenization_merchant.sql
+
+-- ===========================================================================
+-- Rafiq — a third merchant, for tokenization
+--
+-- Three MIDs, each provisioned for one job:
+--
+--   payment      OTP or Non-OTP, whichever `flow` selects
+--   tokenization every call that mints, charges or retires a stored token
+--
+-- Tokenization is not a flow you switch to — it runs alongside whichever
+-- payment flow is live, so it is a third slot rather than a third option on the
+-- selector. A sourceId belongs to the merchant that minted it, which is why
+-- direct-payment and delink follow the token's merchant and not the payment
+-- one: charging a token under a different MID answers 0003.
+-- ===========================================================================
+
+alter table gateway_settings
+  add column merchant_id_tokenization text
+    check (merchant_id_tokenization is null or merchant_id_tokenization ~ '^\d{7}$');
+
+-- Seed the MIDs this deployment was given, without disturbing anything an
+-- admin has already set — `is null` on each column keeps it re-runnable and
+-- keeps /settings the authority.
+update gateway_settings
+   set merchant_id_non_otp = coalesce(merchant_id_non_otp, '7000111'),
+       merchant_id_otp = coalesce(merchant_id_otp, '7000222'),
+       merchant_id_tokenization = coalesce(merchant_id_tokenization, '7000333')
+ where id;
 
 -- >>> seed.sql
 

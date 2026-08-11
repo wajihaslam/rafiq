@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { InquireButton } from "@/components/InquireButton";
 import { Money } from "@/components/Money";
 import { StatusBadge } from "@/components/StatusBadge";
 import { getSupabaseServerClient, requireUser } from "@/lib/supabase/server";
@@ -25,10 +26,15 @@ export default async function OrdersPage() {
       ) : (
         <ul className="divide-y divide-slate-200 rounded-xl border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
           {orders.map((order) => (
-            <li key={order.id}>
+            <li
+              key={order.id}
+              className="flex items-center gap-4 pr-4 hover:bg-slate-50 dark:hover:bg-slate-900"
+            >
+              {/* The button sits outside the link on purpose — nesting it
+                  inside an anchor is invalid, and every click would navigate. */}
               <Link
                 href={`/orders/${order.id}`}
-                className="flex items-center gap-4 p-4 hover:bg-slate-50 dark:hover:bg-slate-900"
+                className="flex flex-1 items-center gap-4 p-4"
               >
                 <div className="flex-1">
                   <p className="font-medium">{order.order_ref}</p>
@@ -41,6 +47,9 @@ export default async function OrdersPage() {
                   <Money amount={order.amount} />
                 </span>
               </Link>
+              {order.status === "pending" && (
+                <InquireButton orderId={order.id} />
+              )}
             </li>
           ))}
         </ul>

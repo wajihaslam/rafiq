@@ -62,7 +62,8 @@ Three rules the code holds to, all of them load-bearing:
 | [src/lib/collection/](src/lib/collection/) | The gateway client: `client.ts` (endpoints), `codes.ts` (response table + classification), `validate.ts` (§3 field rules), `types.ts` |
 | [src/lib/orders.ts](src/lib/orders.ts) | Order lifecycle; `applyOutcome` is the single place pending → paid/failed is decided |
 | [src/lib/subscriptions.ts](src/lib/subscriptions.ts) | Renewal charging, retry/backoff, dead-token handling |
-| [src/app/api/](src/app/api/) | Route handlers — checkout, wallets, subscriptions, postback, cron |
+| [src/lib/api-logs.ts](src/lib/api-logs.ts) | The API call log — redaction, writing, querying |
+| [src/app/api/](src/app/api/) | Route handlers — checkout, wallets, subscriptions, postback, cron, webhook catcher |
 | [supabase/migrations/](supabase/migrations/) | Schema and RLS policies |
 
 ---
@@ -161,14 +162,74 @@ gateway will not be, and every call will time out into an indeterminate result.
 
 ## Runtime configuration
 
-`/settings` edits the three values that change most often between environments
-and merchants, without a redeploy:
+`/settings` edits the values that change most often between environments and
+merchants, without a redeploy:
 
 | Field | Overrides | Notes |
 | --- | --- | --- |
-| Merchant ID | `COLLECTION_MERCHANT_ID` | 7 digits, as provisioned |
-| Flow | `COLLECTION_FLOW` | OTP or Non-OTP — must match the MID |
-| Base URL for Payment API | `COLLECTION_BASE_URL` | origin only; the gateway prefix and path are appended |
+| OTP merchant | `COLLECTION_MERCHANT_ID_OTP` | 7 digits, as provisioned |
+| Non-OTP merchant | `COLLECTION_MERCHANT_ID_NON_OTP` | 7 digits, as provisioned |
+| Tokenization merchant | `COLLECTION_MERCHANT_ID_TOKENIZATION` | not selectable — used by every token call |
+| Active flow | `COLLECTION_FLOW` | selects which *payment* merchant is live, and which sequence checkout runs |
+| Base URL for Payment API | `COLLECTION_BASE_URL` | includes the gateway prefix; endpoint paths are appended verbatim |
+
+### Three merchants, one switch
+
+A MID is provisioned for exactly one job. Which of the three a call uses is
+decided by **what the call does**, not by a global setting:
+
+| Role | Merchant | Calls |
+| --- | --- | --- |
+| `payment` | OTP or Non-OTP, whichever `flow` selects | `initiate`, `verify`, hosted `/checkout` and its `/inquire` |
+| `tokenization` | the tokenization merchant, always | `initiate`/`verify` with `transactionType: "8"`, `finalize`, `direct-payment`, `delink`, JazzCash registration |
+
+The two payment merchants are the switch: selecting OTP runs
+`initiate → OTP → verify` under the OTP MID, Non-OTP runs `verify` alone under
+the Non-OTP MID. They move together, so the pair can never be left mismatched
+(new flow, old MID). Calling a MID on the other flow's sequence answers
+`0015 Invalid-Flow`.
+
+Tokenization is **not** a third option on that switch — it runs alongside
+whichever payment flow is live. `direct-payment` and `delink` use it even though
+one of them moves money: a `sourceId` belongs to the merchant that minted it, so
+charging a token under the payment MID answers `0003`. For `initiate`/`verify`
+the role is derived from `transactionType` — `"8"` *is* tokenization — so those
+two cannot be called with a merchant that contradicts their payload.
+
+**Inquiry and refund follow the original call.** A transaction is only visible
+to the MID that created it, so asking under a different one answers
+`0090 No-Transaction-Found` — indistinguishable from a payment that never
+happened. `/api/orders/[id]/inquire` therefore reads the merchant id back out of
+`transactions.request` (the oldest row for the order — what we actually sent)
+and passes it explicitly, rather than re-reading a configuration that may have
+been switched since.
+
+Each role demands only what it uses: an unset tokenization merchant does not
+block ordinary payments, and an unset flow does not block a subscription
+renewal. The merchant belonging to the *inactive* flow is never a silent
+fallback.
+
+`COLLECTION_MERCHANT_ID` still works as a legacy fallback for the two payment
+slots. It deliberately does **not** cover tokenization.
+
+The base URL is **everything up to the version segment, gateway prefix
+included** — endpoint paths are appended to it exactly as written and nothing is
+spliced in between. A fresh install starts at
+`http://3.127.43.66:8001/mock/collection`, so a payment goes to:
+
+```
+http://3.127.43.66:8001/mock/collection/v2/wallets/transaction/verify
+```
+
+Every path in `client.ts` therefore begins at `/v2` or `/v3`, or at a hosted
+route (`/checkout`, `/inquire`, `/jc/registrationfull`). `/settings` shows one
+resolved endpoint in full, since a doubled or missing prefix is otherwise
+invisible until a call 404s.
+
+There is no separate prefix setting: it was one, and splitting the URL in two
+meant pasting the address the gateway team gave you produced
+`/mock/collection/mock/collection/v2/…`. A base URL whose path is an exact
+doubling is now collapsed on save as a guard.
 
 They live in the single-row `gateway_settings` table, which is **sufficient on
 its own** — the app needs no `COLLECTION_BASE_URL`, `COLLECTION_MERCHANT_ID` or
@@ -200,6 +261,50 @@ update profiles set is_admin = true where id = '<auth user id>';
 Everything else — merchant key, the refund signing secret, region/mode/version
 headers, the postback and cron secrets — stays env-only on purpose: secrets do
 not belong in a table an app screen can edit.
+
+---
+
+## API call log and the webhook catcher
+
+`/logs` (admin-only) shows every HTTP conversation the app takes part in, newest
+first, with headers, bodies, status, gateway code and duration:
+
+- **outbound** — every call to the Collection gateway, including the ones that
+  failed to connect or came back non-JSON. Hosted hand-offs (`/checkout`,
+  JazzCash registration) are logged as the request only; their outcome arrives
+  later as its own row from the return-URL inquiry or the postback.
+- **inbound** — gateway postbacks and anything sent to the webhook catcher.
+
+Filter by direction, operation or free text; expand a row for the full payload.
+Auto-refresh polls every five seconds while it is ticked.
+
+Keys that look like secrets — `key`, `secret`, `token`, `signature`, `otp`,
+`authorization`, `cookie` — are redacted **before** the row is written, so the
+table never holds them. `merchantId` is deliberately kept: it is not a secret,
+and it is the first thing you need when a call answers `0003`.
+
+Logging is best-effort by design. A failed log write is a `console.warn` and
+nothing more — a payment must never fail because a diagnostic row could not be
+saved. The `transactions` table, not this one, remains the record of what
+happened to money.
+
+### Webhook catcher
+
+```
+POST https://<your-app>/api/webhooks/catch
+```
+
+The absolute URL is shown on `/settings`, resolved from the request itself so it
+is correct on localhost, behind a tunnel and on a preview deployment. It accepts
+any method, any content type and any sub-path
+(`/api/webhooks/catch/easypaisa` is logged under `webhook.easypaisa`), records
+the query string, headers and body in the log, and answers `200` with
+`{"ok": true, "message": "Webhook received."}`.
+
+It is unauthenticated on purpose — the point is to catch calls you have not
+configured yet — and it has **no side effects**: it never touches an order, a
+token or a subscription. Real settlement still goes to
+`/api/collection/postback`, which checks the shared secret and is also logged.
 
 ---
 
