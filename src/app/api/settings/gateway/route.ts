@@ -20,7 +20,11 @@ const blankToNull = z
   .transform((v) => (v === "" ? null : v));
 
 const schema = z.object({
-  merchantId: blankToNull,
+  /** The merchant provisioned on each flow. `flow` selects which one is live. */
+  merchantIdOtp: blankToNull,
+  merchantIdNonOtp: blankToNull,
+  /** Not selectable: used by every token call whatever the flow is. */
+  merchantIdTokenization: blankToNull,
   flow: blankToNull,
   baseUrl: blankToNull,
 });

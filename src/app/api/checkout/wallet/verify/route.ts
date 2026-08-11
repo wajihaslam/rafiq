@@ -81,15 +81,20 @@ export async function POST(request: Request) {
     // A wrong or missing OTP is recoverable — leave the order pending so the
     // customer can retry, and don't burn the transaction.
     const retryable = ["0011", "0095"];
+    // Verify accepting the charge is not the same as the money having settled,
+    // so a success code holds the order pending until an inquiry says otherwise.
     const status = retryable.includes(call.code)
       ? "pending"
       : await applyOutcome({
           orderId: order.id,
           code: call.code,
           gatewayTransactionId: call.body?.transactionId,
+          holdSuccess: true,
         });
 
-    if (status === "paid") {
+    // The cart closes on anything that isn't an outright failure — the gateway
+    // has taken the charge and the customer must not be able to pay it twice.
+    if (status !== "failed" && !retryable.includes(call.code)) {
       const cart = await loadOpenCart(user.id);
       if (cart) await closeCart(cart.cartId);
     }

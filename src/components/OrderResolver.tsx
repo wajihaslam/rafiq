@@ -7,9 +7,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * Resolves a pending order by inquiry (guide §6) — the *only* correct response
  * to an indeterminate code. It never re-sends the payment.
  *
- * Polls with a widening interval and gives up after a bounded number of
- * attempts, leaving a manual button: an order can legitimately sit pending for
- * longer than a page visit, and the postback will settle it regardless.
+ * Initiate and verify deliberately leave every non-failed order pending, so
+ * inquiry is what actually settles an order: the button below is the customer's
+ * (and the tester's) way to run it on demand, alongside the background poll.
+ *
+ * The poll widens its interval and gives up after a bounded number of attempts —
+ * an order can legitimately sit pending for longer than a page visit, and the
+ * postback will settle it regardless.
  */
 const DELAYS_MS = [3000, 5000, 8000, 13000, 21000];
 
@@ -18,6 +22,7 @@ export function OrderResolver({ orderId }: { orderId: string }) {
   const [attempt, setAttempt] = useState(0);
   const [checking, setChecking] = useState(false);
   const [exhausted, setExhausted] = useState(false);
+  const [lastResult, setLastResult] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const check = useCallback(async () => {
@@ -27,13 +32,24 @@ export function OrderResolver({ orderId }: { orderId: string }) {
         method: "POST",
       });
       const payload = await response.json();
-      if (payload.ok && payload.data.orderStatus !== "pending") {
+
+      if (!payload.ok) {
+        setLastResult(payload.message ?? "The inquiry could not be completed.");
+        return false;
+      }
+
+      setLastResult(
+        `${payload.data.code} · ${payload.data.gatewayMessage} — order ${payload.data.orderStatus}`,
+      );
+
+      if (payload.data.orderStatus !== "pending") {
         router.refresh();
         return true;
       }
     } catch {
       // A failed inquiry tells us nothing new; the next attempt or the postback
-      // will. Deliberately silent.
+      // will. Deliberately silent apart from the notice above.
+      setLastResult("We couldn't reach the gateway. Please try again.");
     } finally {
       setChecking(false);
     }
@@ -62,19 +78,27 @@ export function OrderResolver({ orderId }: { orderId: string }) {
         this page updates itself, and we&apos;ll settle the order as soon as we hear
         back.
       </p>
-      {exhausted && (
-        <button
-          type="button"
-          className="btn-ghost mt-3"
-          disabled={checking}
-          onClick={async () => {
-            const settled = await check();
-            if (!settled) setAttempt(0);
-          }}
-        >
-          {checking ? "Checking…" : "Check again"}
-        </button>
+
+      {lastResult && (
+        <p className="mt-2 tabular-nums opacity-80">Last inquiry: {lastResult}</p>
       )}
+
+      <button
+        type="button"
+        className="btn-ghost mt-3"
+        disabled={checking}
+        onClick={async () => {
+          const settled = await check();
+          // A manual inquiry that came back pending restarts the background
+          // poll, so the page keeps watching from here.
+          if (!settled) {
+            setExhausted(false);
+            setAttempt(0);
+          }
+        }}
+      >
+        {checking ? "Inquiring…" : exhausted ? "Inquire again" : "Inquire now"}
+      </button>
     </div>
   );
 }

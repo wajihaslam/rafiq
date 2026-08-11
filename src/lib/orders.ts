@@ -101,12 +101,18 @@ export async function recordTransaction(params: {
  *
  * A terminal status is never walked back: once an order is paid, a late
  * duplicate response cannot fail it.
+ *
+ * `holdSuccess` is for initiate/verify: a success code there means the gateway
+ * accepted the request, not that the money is settled, so the order is held
+ * `pending` until an inquiry (or the postback) confirms it. Failures are still
+ * failures — only the success side is held.
  */
 export async function applyOutcome(params: {
   orderId: string;
   code: string;
   gatewayTransactionId?: string | null;
   operatorId?: string | null;
+  holdSuccess?: boolean;
 }): Promise<OrderStatus> {
   const admin = getSupabaseAdminClient();
   const outcome = classify(params.code);
@@ -123,7 +129,13 @@ export async function applyOutcome(params: {
   }
 
   const next: OrderStatus =
-    outcome === "success" ? "paid" : outcome === "failure" ? "failed" : "pending";
+    outcome === "success"
+      ? params.holdSuccess
+        ? "pending"
+        : "paid"
+      : outcome === "failure"
+        ? "failed"
+        : "pending";
 
   const patch: Record<string, unknown> = {
     status: next,

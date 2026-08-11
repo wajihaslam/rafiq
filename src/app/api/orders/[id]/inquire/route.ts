@@ -12,6 +12,28 @@ import * as gateway from "@/lib/collection/client";
 import { applyOutcome, recordTransaction } from "@/lib/orders";
 import { getSupabaseAdminClient, requireUser } from "@/lib/supabase/server";
 
+/**
+ * The merchant id sent on the earliest recorded call for an order.
+ *
+ * `transactions.request` is what we actually put on the wire, so it is the only
+ * honest answer — reading the configuration again would return whatever it says
+ * *now*, which is exactly what goes wrong after a flow switch. Oldest first:
+ * later rows may be inquiries, and an inquiry that already used the wrong MID
+ * would otherwise perpetuate itself.
+ */
+async function merchantIdOfFirstCall(orderId: string): Promise<string | undefined> {
+  const { data } = await getSupabaseAdminClient()
+    .from("transactions")
+    .select("request")
+    .eq("order_id", orderId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  const sent = (data?.request as { merchantId?: unknown } | null)?.merchantId;
+  return typeof sent === "string" && sent !== "" ? sent : undefined;
+}
+
 export async function POST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -41,8 +63,19 @@ export async function POST(
     let gatewayTransactionId: string | null | undefined;
     let operatorId: string | null | undefined = order.operator_id;
 
+    /**
+     * An inquiry has to be made under the merchant that made the original call
+     * — a transaction is only visible to the MID that created it, and asking
+     * under another one answers 0090, which is indistinguishable from a payment
+     * that never happened. Three merchants are configured, so this is no longer
+     * something the client can infer: the MID we actually sent is read back off
+     * the audit trail. Null falls back to the current configuration, which is
+     * the best guess available for a row written before this was recorded.
+     */
+    const originalMerchantId = await merchantIdOfFirstCall(order.id);
+
     if (order.channel === "hosted_page") {
-      const call = await gateway.hostedInquiry(order.order_ref);
+      const call = await gateway.hostedInquiry(order.order_ref, originalMerchantId);
       code = call.code;
       gatewayTransactionId = call.body?.transactionId;
       operatorId = call.body?.operatorId ?? operatorId;
@@ -67,6 +100,7 @@ export async function POST(
       const call = await gateway.inquiry({
         transactionId: txn?.gateway_transaction_id ?? undefined,
         userKey: order.order_ref,
+        merchantId: originalMerchantId,
       });
       code = call.code;
       gatewayTransactionId =

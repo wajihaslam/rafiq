@@ -45,9 +45,14 @@ export default async function RootLayout({
                 </>
               )}
               {admin && (
-                <Link href="/settings" className="hover:underline">
-                  Configuration
-                </Link>
+                <>
+                  <Link href="/settings" className="hover:underline">
+                    Configuration
+                  </Link>
+                  <Link href="/logs" className="hover:underline">
+                    API Logs
+                  </Link>
+                </>
               )}
             </div>
             <div className="ml-auto flex items-center gap-3 text-sm">

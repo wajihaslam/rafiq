@@ -15,7 +15,7 @@ import { closeCart, loadOpenCart } from "@/lib/cart";
 import * as gateway from "@/lib/collection/client";
 import { OPERATORS } from "@/lib/collection/types";
 import { applyOutcome, createOrder, recordTransaction } from "@/lib/orders";
-import { getGatewayConfig } from "@/lib/settings";
+import { getActiveFlow } from "@/lib/settings";
 import { getSupabaseAdminClient, requireUser } from "@/lib/supabase/server";
 
 const schema = z
@@ -111,7 +111,7 @@ export async function POST(request: Request) {
     // ---- fresh wallet payment -------------------------------------------
     const operatorId = input.operatorId!;
     const msisdn = input.msisdn!;
-    const { flow } = await getGatewayConfig();
+    const flow = await getActiveFlow();
 
     const order = await createOrder({
       userId: user.id,
@@ -148,7 +148,11 @@ export async function POST(request: Request) {
       // initiate only creates the transaction; 0000 here means "OTP sent",
       // not "paid". The order stays pending until verify.
       if (call.code !== "0000") {
-        const status = await applyOutcome({ orderId: order.id, code: call.code });
+        const status = await applyOutcome({
+          orderId: order.id,
+          code: call.code,
+          holdSuccess: true,
+        });
         return fromGateway(call.code, {
           orderId: order.id,
           orderRef: order.order_ref,
@@ -192,12 +196,16 @@ export async function POST(request: Request) {
       operatorId,
     });
 
+    // Verify is a payment attempt, not a settlement: a success code holds the
+    // order pending until an inquiry confirms it. The cart still closes — the
+    // gateway accepted the charge and the customer must not pay twice.
     const status = await applyOutcome({
       orderId: order.id,
       code: call.code,
       gatewayTransactionId: call.body?.transactionId,
+      holdSuccess: true,
     });
-    if (status === "paid") await closeCart(cart.cartId);
+    if (status !== "failed") await closeCart(cart.cartId);
 
     return fromGateway(call.code, {
       orderId: order.id,
