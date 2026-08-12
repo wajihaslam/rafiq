@@ -20,6 +20,28 @@ export type TxnKind =
   | "refund"
   | "delink";
 
+/**
+ * The gateway call a transaction row records. `kind` says what the call was
+ * about; this says what it did — initiate and verify are both `payment`, and
+ * telling them apart is the whole of what a step breadcrumb needs.
+ */
+export type TxnOperation =
+  | "initiate"
+  | "verify"
+  | "finalize"
+  | "direct_payment"
+  | "inquiry"
+  | "refund"
+  | "delink"
+  | "postback";
+
+/** How an order was paid for. Mirrors `orders.channel`. */
+export type OrderChannel =
+  | "wallet_otp"
+  | "wallet_non_otp"
+  | "hosted_page"
+  | "direct_payment";
+
 export interface Product {
   id: string;
   slug: string;
@@ -30,15 +52,6 @@ export interface Product {
   kind: ProductKind;
   interval_days: number | null;
   active: boolean;
-}
-
-export interface CartItem {
-  id: string;
-  cart_id: string;
-  product_id: string;
-  qty: number;
-  unit_price: number;
-  products?: Product | null;
 }
 
 export interface Order {
@@ -63,6 +76,35 @@ export interface OrderItem {
   name: string;
   qty: number;
   unit_price: number;
+}
+
+export interface Transaction {
+  id: string;
+  order_id: string | null;
+  user_id: string | null;
+  gateway_transaction_id: string | null;
+  operator_id: string | null;
+  kind: TxnKind;
+  operation: TxnOperation | null;
+  status_code: string;
+  message: string | null;
+  indeterminate: boolean;
+  created_at: string;
+}
+
+/** An in-flight wallet link, keyed by the orderRef/userKey we sent. */
+export interface WalletRegistration {
+  id: string;
+  user_id: string;
+  order_ref: string;
+  operator_id: string;
+  msisdn: string;
+  label: string | null;
+  gateway_transaction_id: string | null;
+  status: "pending" | "linked" | "declined" | "failed";
+  status_code: string | null;
+  message: string | null;
+  created_at: string;
 }
 
 export interface PaymentToken {

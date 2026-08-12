@@ -36,8 +36,11 @@ export default async function RootLayout({
               </Link>
               {user && (
                 <>
+                  {/* "Payments", not "Orders": the page tracks one-time
+                      payments and wallet tokenization side by side, and only
+                      one of those produces anything you would call an order. */}
                   <Link href="/orders" className="hover:underline">
-                    Orders
+                    Payments
                   </Link>
                   <Link href="/wallets" className="hover:underline">
                     Wallets
@@ -56,9 +59,6 @@ export default async function RootLayout({
               )}
             </div>
             <div className="ml-auto flex items-center gap-3 text-sm">
-              <Link href="/cart" className="btn-ghost">
-                Cart
-              </Link>
               {user ? (
                 <SignOutButton />
               ) : (

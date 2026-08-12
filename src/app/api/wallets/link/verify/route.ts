@@ -1,13 +1,20 @@
 /**
  * Completes an Easypaisa wallet link: verify with transactionType "8" mints the
  * sourceId. A one-time payment never walks away with a reusable token, so the
- * presence of sourceId is itself the signal that tokenization succeeded.
+ * presence of sourceId is itself the signal that tokenization succeeded — and
+ * that is taken literally here, because this gateway returns a perfectly good
+ * sourceId alongside `0015 Invalid-Flow`. Insisting on `0000` as well threw the
+ * token away and reported a failure to a customer who had just been linked.
+ *
+ * On the `verify_only` sequence there is no initiate to continue, so there is no
+ * transactionId to send: verify starts and finishes the transaction by itself.
  */
 
 import { z } from "zod";
 
-import { err, fromGateway, handleRouteError } from "@/lib/api";
+import { err, fromGateway, handleRouteError, ok } from "@/lib/api";
 import * as gateway from "@/lib/collection/client";
+import { codeMessage } from "@/lib/collection/codes";
 import { recordTransaction } from "@/lib/orders";
 import { getSupabaseAdminClient, requireUser } from "@/lib/supabase/server";
 
@@ -36,9 +43,6 @@ export async function POST(request: Request) {
     if (reg.status === "linked") {
       return err("0005", "This wallet is already linked.", 409);
     }
-    if (!reg.gateway_transaction_id) {
-      return err("0097", "We lost track of this link. Please start again.", 409);
-    }
 
     const call = await gateway.verify({
       operatorId: reg.operator_id as "100007" | "100008",
@@ -46,7 +50,12 @@ export async function POST(request: Request) {
       userKey: reg.order_ref,
       msisdn: reg.msisdn,
       transactionType: "8",
-      transactionId: reg.gateway_transaction_id,
+      // Only when there is an initiate to continue. Sending a transactionId we
+      // never received would answer 0097; omitting it on the OTP sequence would
+      // start a second transaction and orphan the first.
+      ...(reg.gateway_transaction_id
+        ? { transactionId: reg.gateway_transaction_id }
+        : {}),
       otp,
     });
 
@@ -54,13 +63,15 @@ export async function POST(request: Request) {
       orderId: null,
       userId: user.id,
       kind: "tokenization",
+      operation: "verify",
       call,
       gatewayTransactionId: call.body?.transactionId,
       operatorId: reg.operator_id,
     });
 
     const sourceId = call.body?.sourceId;
-    if (call.code === "0000" && sourceId) {
+    // The token, not the code, is the evidence — see the note at the top.
+    if (sourceId) {
       const { error } = await admin.from("payment_tokens").insert({
         user_id: user.id,
         operator_id: reg.operator_id,
@@ -88,8 +99,26 @@ export async function POST(request: Request) {
       }
     }
 
+    /**
+     * Reported as a success when a token came back, whatever code came with it.
+     * `fromGateway` would classify 0015 as a failure and attach "The payment
+     * could not be completed" — a flat contradiction of the wallet that is now
+     * sitting in the customer's list, and a message no consumer should have to
+     * know to ignore.
+     */
+    if (sourceId) {
+      return ok({
+        code: call.code,
+        outcome: "success",
+        message: "Wallet linked.",
+        gatewayMessage: codeMessage(call.code),
+        linked: true,
+        canRetryOtp: false,
+      });
+    }
+
     return fromGateway(call.code, {
-      linked: Boolean(sourceId),
+      linked: false,
       canRetryOtp: ["0011", "0095"].includes(call.code),
     });
   } catch (error) {

@@ -35,6 +35,7 @@ export async function POST(
       orderId: null,
       userId: user.id,
       kind: "delink",
+      operation: "delink",
       call,
       operatorId: token.operator_id,
     });

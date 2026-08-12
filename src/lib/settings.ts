@@ -18,7 +18,11 @@
 import "server-only";
 import { cache } from "react";
 
-import { serverEnv, type CollectionFlow } from "@/lib/env";
+import {
+  serverEnv,
+  type CollectionFlow,
+  type TokenizationSequence,
+} from "@/lib/env";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 
 export interface GatewaySettingsRow {
@@ -27,10 +31,18 @@ export interface GatewaySettingsRow {
   merchant_id_tokenization: string | null;
   /** Which of the two *payment* merchants above is live. */
   flow: CollectionFlow | null;
+  /** How a wallet link runs. Independent of `flow`. */
+  tokenization_sequence: TokenizationSequence | null;
   base_url: string | null;
   updated_at: string;
   updated_by: string | null;
 }
+
+/** What the guide documents, and so what we assume when nobody has said. */
+export const DEFAULT_TOKENIZATION_SEQUENCE: TokenizationSequence = "initiate_verify";
+
+const SELECT_COLUMNS =
+  "merchant_id_otp, merchant_id_non_otp, merchant_id_tokenization, flow, tokenization_sequence, base_url, updated_at, updated_by";
 
 /**
  * The three merchant slots. `otp` and `non_otp` are the two payment merchants,
@@ -55,6 +67,8 @@ export type ConfigField =
   | "tokenizationMerchantId"
   | "flow"
   | "baseUrl";
+// `tokenizationSequence` is deliberately not a ConfigField: it always resolves
+// to something, so it can never be a configuration *gap* that blocks a call.
 export type ConfigSource = "settings" | "env" | "unset";
 
 /** What is configured right now, gaps included. Safe to render. */
@@ -68,6 +82,8 @@ export interface GatewayConfigState {
   /** The merchant every token call is made under, whatever the flow is. */
   tokenizationMerchantId: string | null;
   flow: CollectionFlow | null;
+  /** Never null: falls back to the environment, then to the documented default. */
+  tokenizationSequence: TokenizationSequence;
   baseUrl: string | null;
   /** All three slots, for the settings screen. Not what a call uses. */
   merchants: MerchantIds;
@@ -187,6 +203,16 @@ export function assertSettingsFlow(value: string): CollectionFlow {
   return value;
 }
 
+export function assertTokenizationSequence(value: string): TokenizationSequence {
+  if (value !== "initiate_verify" && value !== "verify_only") {
+    throw new SettingsError(
+      "tokenizationSequence",
+      "Tokenization sequence must be either initiate + verify, or verify only.",
+    );
+  }
+  return value;
+}
+
 /**
  * Reads the singleton row. Memoised per request: a single checkout touches the
  * config several times and one round trip is enough.
@@ -199,9 +225,7 @@ export const readGatewaySettings = cache(
     const admin = getSupabaseAdminClient();
     const { data, error } = await admin
       .from("gateway_settings")
-      .select(
-        "merchant_id_otp, merchant_id_non_otp, merchant_id_tokenization, flow, base_url, updated_at, updated_by",
-      )
+      .select(SELECT_COLUMNS)
       .eq("id", true)
       .maybeSingle();
 
@@ -258,6 +282,15 @@ export async function getActiveFlow(): Promise<CollectionFlow> {
   return (await getGatewayConfig("payment")).flow as CollectionFlow;
 }
 
+/**
+ * How a wallet link runs. Separate from `getActiveFlow` on purpose: tokenization
+ * does not follow the payment flow, and reading one for the other is exactly the
+ * mistake that produced 0015 on every link attempt.
+ */
+export async function getTokenizationSequence(): Promise<TokenizationSequence> {
+  return (await getGatewayConfigState()).tokenizationSequence;
+}
+
 /** Just the host, for building a URL. Never a reason to demand a merchant. */
 export async function getBaseUrl(): Promise<string> {
   const { baseUrl } = await getGatewayConfigState();
@@ -292,6 +325,12 @@ function resolve(row: GatewaySettingsRow | null): GatewayConfigState {
     merchantId,
     tokenizationMerchantId: merchants.tokenization,
     flow,
+    // Row, then env, then the guide's documented behaviour. Unlike `flow` this
+    // one has a defensible default, so it never reads as a gap.
+    tokenizationSequence:
+      row?.tokenization_sequence ??
+      serverEnv.tokenizationSequence() ??
+      DEFAULT_TOKENIZATION_SEQUENCE,
     baseUrl,
     merchants,
     source: {
@@ -321,6 +360,7 @@ export async function saveGatewaySettings(input: {
   merchantIdNonOtp: string | null;
   merchantIdTokenization: string | null;
   flow: string | null;
+  tokenizationSequence: string | null;
   baseUrl: string | null;
   updatedBy: string;
 }): Promise<GatewayConfigState> {
@@ -341,6 +381,10 @@ export async function saveGatewaySettings(input: {
             "merchantIdTokenization",
           ),
     flow: input.flow === null ? null : assertSettingsFlow(input.flow),
+    tokenization_sequence:
+      input.tokenizationSequence === null
+        ? null
+        : assertTokenizationSequence(input.tokenizationSequence),
     base_url: input.baseUrl === null ? null : normaliseBaseUrl(input.baseUrl),
     updated_by: input.updatedBy,
   };
@@ -349,9 +393,7 @@ export async function saveGatewaySettings(input: {
   const { data, error } = await admin
     .from("gateway_settings")
     .upsert({ id: true, ...patch }, { onConflict: "id" })
-    .select(
-      "merchant_id_otp, merchant_id_non_otp, merchant_id_tokenization, flow, base_url, updated_at, updated_by",
-    )
+    .select(SELECT_COLUMNS)
     .single();
 
   if (error) throw new Error(`Could not save gateway settings: ${error.message}`);

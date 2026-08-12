@@ -3,7 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { StepTrail } from "@/components/StepTrail";
 import { OPERATOR_LABELS } from "@/lib/collection/types";
+import { tokenSteps } from "@/lib/steps";
 
 /**
  * Linking differs by operator and the server tells us which path we're on:
@@ -12,8 +14,16 @@ import { OPERATOR_LABELS } from "@/lib/collection/types";
  *
  * Tokenization always uses an OTP regardless of the merchant's flow (guide §2) —
  * that's the whole point: consent once, then charge with the customer absent.
+ *
+ * There is no limit of one wallet per operator: the form stays available with
+ * wallets already linked, and each link is a fresh registration.
  */
-export function LinkWalletForm() {
+export function LinkWalletForm({
+  sequence = "initiate_verify",
+}: {
+  /** Whether an initiate call sends the OTP, or verify is the only call. */
+  sequence?: "initiate_verify" | "verify_only";
+}) {
   const router = useRouter();
   const [operatorId, setOperatorId] = useState<"100007" | "100008">("100007");
   const [msisdn, setMsisdn] = useState("");
@@ -51,7 +61,12 @@ export function LinkWalletForm() {
 
     if (payload.data.needsOtp) {
       setOrderRef(payload.data.orderRef);
-      setNotice({ tone: "info", text: "Enter the OTP sent to your mobile." });
+      setNotice({
+        tone: "info",
+        // The route knows whether it just sent an OTP or is waiting for one the
+        // operator sent; prefer its wording over a guess made here.
+        text: payload.data.message ?? "Enter the OTP sent to your mobile.",
+      });
       return;
     }
 
@@ -95,41 +110,37 @@ export function LinkWalletForm() {
   return (
     <section className="card space-y-4">
       <div>
-        <h2 className="font-medium">Link a new wallet</h2>
-        {/* Tokenization is two steps and always OTP-verified, whatever flow the
-            payment merchant is on — so the step count is fixed and can be
+        <h2 className="font-medium">Link a wallet</h2>
+        {/* Tokenization is always verified before it can be charged, whatever
+            flow the payment merchant is on — so the sequence is fixed and can be
             stated up front rather than discovered. */}
         <p className="mt-1 text-sm text-slate-500">
           {orderRef
-            ? "Step 2 of 2 — confirm the OTP to finish linking."
-            : "Step 1 of 2 — we'll send an OTP to approve the link."}{" "}
+            ? "Confirm the OTP to finish linking."
+            : operatorId === "100008"
+              ? "JazzCash takes consent on its own page — we'll send you there and redeem the result when you come back."
+              : sequence === "verify_only"
+                ? // No initiate on this gateway, so we are not the ones sending
+                  // it — claiming otherwise would leave the customer waiting for
+                  // a message we never asked for.
+                  "Enter the OTP for this wallet to approve the link."
+                : "We'll send an OTP to approve the link."}{" "}
           Linking saves your consent once so later charges need no OTP. It does
           not move any money.
         </p>
       </div>
 
-      <ol className="flex gap-2 text-xs">
-        {[
-          { n: 1, label: "Wallet details" },
-          { n: 2, label: "Confirm OTP" },
-        ].map((step) => {
-          const current = orderRef ? 2 : 1;
-          const state =
-            step.n === current
-              ? "border-brand-500 text-brand-600 font-medium"
-              : step.n < current
-                ? "border-emerald-500 text-emerald-600"
-                : "border-slate-200 text-slate-400 dark:border-slate-800";
-          return (
-            <li
-              key={step.n}
-              className={`flex-1 rounded-lg border px-3 py-2 ${state}`}
-            >
-              {step.n < current ? "✓" : step.n}. {step.label}
-            </li>
-          );
+      {/* The same trail the wallet itself will carry once it exists, so the
+          steps do not get renamed the moment linking succeeds. */}
+      <StepTrail
+        steps={tokenSteps({
+          initiated: Boolean(orderRef),
+          verified: false,
+          charges: 0,
+          refunds: 0,
+          live: true,
         })}
-      </ol>
+      />
 
       {notice && (
         <p

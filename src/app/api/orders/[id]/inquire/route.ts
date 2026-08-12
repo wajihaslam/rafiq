@@ -7,7 +7,6 @@
  */
 
 import { err, fromGateway, handleRouteError } from "@/lib/api";
-import { closeCart, loadOpenCart } from "@/lib/cart";
 import * as gateway from "@/lib/collection/client";
 import { applyOutcome, recordTransaction } from "@/lib/orders";
 import { getSupabaseAdminClient, requireUser } from "@/lib/supabase/server";
@@ -74,6 +73,9 @@ export async function POST(
      */
     const originalMerchantId = await merchantIdOfFirstCall(order.id);
 
+    // Hosted-page checkout is no longer offered, but orders placed through it
+    // before it was withdrawn still have to be resolvable — they are inquired
+    // by orderId, which is a different endpoint from the wallet one.
     if (order.channel === "hosted_page") {
       const call = await gateway.hostedInquiry(order.order_ref, originalMerchantId);
       code = call.code;
@@ -83,6 +85,7 @@ export async function POST(
         orderId: order.id,
         userId: user.id,
         kind: "payment",
+        operation: "inquiry",
         call,
         gatewayTransactionId,
         operatorId,
@@ -109,7 +112,10 @@ export async function POST(
       await recordTransaction({
         orderId: order.id,
         userId: user.id,
-        kind: "payment",
+        // An inquiry is about whatever the order was: a token charge stays
+        // tokenization traffic, so the two ledgers do not bleed into each other.
+        kind: order.channel === "direct_payment" ? "direct_payment" : "payment",
+        operation: "inquiry",
         call,
         gatewayTransactionId,
         operatorId,
@@ -127,11 +133,6 @@ export async function POST(
             gatewayTransactionId,
             operatorId,
           });
-
-    if (status === "paid") {
-      const cart = await loadOpenCart(user.id);
-      if (cart) await closeCart(cart.cartId);
-    }
 
     return fromGateway(code, { orderId: order.id, orderStatus: status });
   } catch (error) {

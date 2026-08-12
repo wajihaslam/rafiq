@@ -1,17 +1,23 @@
 /**
- * The payment mechanics, independent of *what* is being paid for.
+ * The payment mechanics for a one-time purchase, independent of *what* is being
+ * paid for.
  *
- * The cart checkout and the shop's "Pay now" both run the same three shapes —
- * saved token, OTP wallet, non-OTP wallet, plus the hosted page — so they live
- * here once and each route supplies its own lines and its own aftercare (the
- * cart route closes the cart; a direct product payment has nothing to close).
+ * There is exactly one shape now: a mobile wallet, run as the merchant's flow
+ * demands — `initiate → OTP → verify` on the OTP flow, `verify` alone on
+ * Non-OTP. The saved-token and hosted-page paths that used to live here are
+ * gone: a stored token is charged from the wallet it belongs to (`direct
+ * payment`, which is tokenization and tracked as such), and the hosted page is
+ * no longer offered at checkout.
+ *
+ * Keeping this out of the route handler still earns its place — the OTP and
+ * Non-OTP branches differ in ways (which call, which channel, whether success
+ * is held) that no route should have to remember.
  */
 
 import "server-only";
 
 import * as gateway from "@/lib/collection/client";
-import { OPERATORS } from "@/lib/collection/types";
-import { publicEnv } from "@/lib/env";
+import type { OperatorId } from "@/lib/collection/types";
 import { applyOutcome, createOrder, recordTransaction } from "@/lib/orders";
 import { getActiveFlow } from "@/lib/settings";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
@@ -24,38 +30,24 @@ export interface PayLine {
   unit_price: number;
 }
 
-export type PayMethod =
-  | { kind: "saved"; savedTokenId: string }
-  | { kind: "wallet"; operatorId: string; msisdn: string }
-  | { kind: "hosted" };
-
 /** Everything the API layer needs to answer, plus what it needs to decide. */
 export interface StartResult {
   code: string;
   orderId: string;
   orderRef: string;
   orderStatus: OrderStatus;
+  /** True on the OTP flow when initiate was accepted and the OTP is on its way. */
   needsOtp: boolean;
-  redirectTo?: string;
   gatewayTransactionId?: string | null;
-  /**
-   * True when the gateway took the charge — i.e. anything that is not an
-   * outright failure. The caller uses this to decide whether the source of the
-   * lines (a cart) may still be spent again.
-   */
-  consumed: boolean;
-  /** Set when the payment cannot start at all; the caller turns it into an error. */
-  problem?: { code: string; message: string; status: number };
 }
 
-/** The OTP-flow second call, shared by both checkout entry points. */
+/** The OTP-flow second call. */
 export interface VerifyResult {
   code: string;
   orderId: string;
   orderRef: string;
   orderStatus: OrderStatus;
   canRetryOtp: boolean;
-  consumed: boolean;
   problem?: { code: string; message: string; status: number };
 }
 
@@ -66,120 +58,11 @@ export async function startPayment(params: {
   userId: string;
   amount: number;
   items: PayLine[];
-  method: PayMethod;
+  operatorId: OperatorId;
+  msisdn: string;
 }): Promise<StartResult> {
-  const { userId, amount, items, method } = params;
+  const { userId, amount, items, operatorId, msisdn } = params;
   const admin = getSupabaseAdminClient();
-
-  // ---- hosted page ------------------------------------------------------
-  if (method.kind === "hosted") {
-    const order = await createOrder({
-      userId,
-      amount,
-      channel: "hosted_page",
-      items,
-    });
-
-    const url = await gateway.hostedCheckoutUrl({
-      orderId: order.order_ref,
-      amount,
-      redirectUrl: `${publicEnv.appUrl()}/pay/hosted/return`,
-    });
-
-    return {
-      code: "0000",
-      orderId: order.id,
-      orderRef: order.order_ref,
-      orderStatus: "pending",
-      needsOtp: false,
-      redirectTo: url,
-      // The browser leaves for the gateway; nothing may be re-spent behind it.
-      consumed: true,
-    };
-  }
-
-  // ---- 1-click with a saved token ---------------------------------------
-  if (method.kind === "saved") {
-    const { data: token } = await admin
-      .from("payment_tokens")
-      .select("*")
-      .eq("id", method.savedTokenId)
-      .eq("user_id", userId)
-      .eq("status", "active")
-      .maybeSingle();
-
-    if (!token) {
-      return {
-        code: "0036",
-        orderId: "",
-        orderRef: "",
-        orderStatus: "failed",
-        needsOtp: false,
-        consumed: false,
-        problem: {
-          code: "0036",
-          message: "That saved wallet is no longer usable.",
-          status: 409,
-        },
-      };
-    }
-
-    const order = await createOrder({
-      userId,
-      amount,
-      channel: "direct_payment",
-      operatorId: token.operator_id,
-      msisdn: token.msisdn,
-      items,
-    });
-
-    const call = await gateway.directPayment({
-      operatorId: token.operator_id as "100007" | "100008",
-      amount,
-      userKey: order.order_ref,
-      sourceId: token.source_id,
-    });
-
-    await recordTransaction({
-      orderId: order.id,
-      userId,
-      kind: "direct_payment",
-      call,
-      gatewayTransactionId: call.body?.transactionId,
-      operatorId: token.operator_id,
-    });
-
-    // A token that is gone stays gone — reflect that locally so the UI stops
-    // offering it. 0034 is a payload fault, not a dead token, so it's excluded.
-    if (call.code === "0028" || call.code === "0036") {
-      await admin
-        .from("payment_tokens")
-        .update({ status: call.code === "0028" ? "expired" : "delinked" })
-        .eq("id", token.id);
-    }
-
-    const status = await applyOutcome({
-      orderId: order.id,
-      code: call.code,
-      gatewayTransactionId: call.body?.transactionId,
-    });
-
-    return {
-      code: call.code,
-      orderId: order.id,
-      orderRef: order.order_ref,
-      orderStatus: status,
-      needsOtp: false,
-      // Anything short of an outright failure counts as spent, exactly as on
-      // the verify path below. An indeterminate direct payment may well have
-      // moved money, so leaving the cart open would invite paying it twice.
-      consumed: status !== "failed",
-    };
-  }
-
-  // ---- fresh wallet payment ---------------------------------------------
-  const operatorId = method.operatorId as typeof OPERATORS.easypaisa;
-  const msisdn = method.msisdn;
   const flow = await getActiveFlow();
 
   const order = await createOrder({
@@ -204,6 +87,7 @@ export async function startPayment(params: {
       orderId: order.id,
       userId,
       kind: "payment",
+      operation: "initiate",
       call,
       gatewayTransactionId: call.body?.transactionId,
       operatorId,
@@ -223,7 +107,6 @@ export async function startPayment(params: {
         orderRef: order.order_ref,
         orderStatus: status,
         needsOtp: false,
-        consumed: false,
       };
     }
 
@@ -239,8 +122,6 @@ export async function startPayment(params: {
       orderStatus: "pending",
       needsOtp: true,
       gatewayTransactionId: call.body?.transactionId ?? null,
-      // The money moves on verify, so nothing is spent yet.
-      consumed: false,
     };
   }
 
@@ -257,6 +138,7 @@ export async function startPayment(params: {
     orderId: order.id,
     userId,
     kind: "payment",
+    operation: "verify",
     call,
     gatewayTransactionId: call.body?.transactionId,
     operatorId,
@@ -277,7 +159,6 @@ export async function startPayment(params: {
     orderRef: order.order_ref,
     orderStatus: status,
     needsOtp: false,
-    consumed: status !== "failed",
   };
 }
 
@@ -301,7 +182,6 @@ export async function verifyOtpPayment(params: {
     orderRef: "",
     orderStatus: "pending" as OrderStatus,
     canRetryOtp: false,
-    consumed: false,
   };
 
   const { data: order } = await admin
@@ -361,7 +241,7 @@ export async function verifyOtpPayment(params: {
   }
 
   const call = await gateway.verify({
-    operatorId: order.operator_id as "100007" | "100008",
+    operatorId: order.operator_id as OperatorId,
     amount: Number(order.amount),
     userKey: order.order_ref,
     msisdn: order.msisdn as string,
@@ -374,6 +254,7 @@ export async function verifyOtpPayment(params: {
     orderId: order.id,
     userId: params.userId,
     kind: "payment",
+    operation: "verify",
     call,
     gatewayTransactionId: call.body?.transactionId,
     operatorId: order.operator_id,
@@ -396,6 +277,5 @@ export async function verifyOtpPayment(params: {
     orderRef: order.order_ref,
     orderStatus: status,
     canRetryOtp,
-    consumed: !canRetryOtp && status !== "failed",
   };
 }

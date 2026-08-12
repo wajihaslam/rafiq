@@ -45,6 +45,14 @@ export const publicEnv = {
 
 export type CollectionFlow = "otp" | "non_otp";
 
+/**
+ * How linking a wallet runs. Guide §2 says tokenization is exempt from the flow
+ * split and always runs `initiate` → `verify`; some gateway builds refuse
+ * `initiate` outright when `transactionType` is `8` and mint the token from
+ * `verify` alone. Which one you are talking to is a fact about the deployment.
+ */
+export type TokenizationSequence = "initiate_verify" | "verify_only";
+
 export const serverEnv = {
   /** Secret key (`sb_secret_…`). Bypasses RLS — server only, never logged. */
   supabaseSecretKey: () => required("SUPABASE_SECRET_KEY"),
@@ -91,6 +99,18 @@ export const serverEnv = {
   flow: (): CollectionFlow | undefined => {
     const value = process.env.COLLECTION_FLOW?.trim();
     if (value === "otp" || value === "non_otp") return value;
+    return undefined;
+  },
+
+  /**
+   * Unlike `flow`, this one *does* default — to the documented behaviour. An
+   * unset flow is a coin toss between two live merchants; this is a fallback to
+   * what the guide says the gateway does, which is the right thing to assume
+   * when nobody has said otherwise.
+   */
+  tokenizationSequence: (): TokenizationSequence | undefined => {
+    const value = process.env.COLLECTION_TOKENIZATION_SEQUENCE?.trim();
+    if (value === "initiate_verify" || value === "verify_only") return value;
     return undefined;
   },
 

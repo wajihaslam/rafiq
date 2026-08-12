@@ -40,6 +40,10 @@ export interface ApiLogRow {
   duration_ms: number | null;
   error: string | null;
   user_id: string | null;
+  /** The gateway's transactionId, lifted out of the bodies so it is searchable. */
+  transaction_id: string | null;
+  /** Our own reference — userKey on wallet calls, orderId on hosted ones. */
+  user_key: string | null;
   created_at: string;
 }
 
@@ -75,7 +79,8 @@ export interface ApiLogInput {
  * `x-postback-secret` and `Authorization` alike without a list of every spelling.
  *
  * `merchantId` is deliberately absent — it is not a secret, and it is the first
- * thing you need when a call comes back 0003.
+ * thing you need when a call comes back 0003. Substring matching does overreach
+ * on a few field names, so see `KEPT_KEYS` below for the exemptions.
  */
 const REDACTED_KEYS = [
   "key",
@@ -89,6 +94,19 @@ const REDACTED_KEYS = [
   "cookie",
 ];
 
+/**
+ * Exempt from the substring rule above, and it has to be an exemption rather
+ * than a cleverer pattern: `userKey` *contains* "key" and was being redacted,
+ * which quietly destroyed the one reference that ties a log line to an order —
+ * every wallet call recorded `"userKey": "[redacted]"`.
+ *
+ * Neither of these is a secret. They are references we generated ourselves and
+ * print on the order page, and they are the first thing you need when a call has
+ * to be traced or quoted to the gateway — the same argument that keeps
+ * `merchantId`, which survives only by not happening to contain a listed word.
+ */
+const KEPT_KEYS = ["userkey", "orderid", "merchantid", "transactionid", "sourceid"];
+
 const REDACTED = "[redacted]";
 
 /** Bodies are truncated at this length before storage. */
@@ -96,6 +114,7 @@ const MAX_RAW_LENGTH = 20_000;
 
 function isRedacted(key: string): boolean {
   const lower = key.toLowerCase();
+  if (KEPT_KEYS.includes(lower)) return false;
   return REDACTED_KEYS.some((needle) => lower.includes(needle));
 }
 
@@ -163,12 +182,70 @@ export function bodyToJson(value: unknown): Json {
 }
 
 /**
+ * The two references that identify one conversation, wherever they turn up.
+ *
+ * Searching the log by URL or operation is nearly useless in practice — every
+ * call goes to the same host and half of them are `collection.verify`. What a
+ * tester actually holds is a transaction id the gateway quoted, or the order
+ * reference we generated. Both are buried at varying depths (`transactionId` at
+ * the top level on a wallet call, under `transaction` on an inquiry, inside
+ * `{query, body}` on a caught webhook), so they are pulled out on the way in and
+ * stored in their own columns. Extracting at read time would mean scanning every
+ * body in the table for every search.
+ */
+const TRANSACTION_ID_KEYS = ["transactionid", "txnid"];
+const USER_KEY_KEYS = ["userkey", "orderid"];
+
+/**
+ * Depth-first search for the first non-empty string under any of `keys`.
+ * Case-insensitive because the hosted endpoints capitalise (`OrderId`) where the
+ * JSON ones do not.
+ */
+function findKey(value: Json, keys: string[], depth = 0): string | null {
+  if (depth > 8 || value === null || typeof value !== "object") return null;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findKey(item, keys, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  for (const [key, inner] of Object.entries(value)) {
+    if (keys.includes(key.toLowerCase())) {
+      if (typeof inner === "string" && inner.trim() !== "") return inner;
+      if (typeof inner === "number") return String(inner);
+    }
+  }
+  // Only descend once the whole level has been checked, so a top-level match
+  // wins over one nested inside an echoed request.
+  for (const inner of Object.values(value)) {
+    const found = findKey(inner, keys, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function firstOf(bodies: Json[], keys: string[]): string | null {
+  for (const body of bodies) {
+    const found = findKey(body, keys);
+    if (found) return found.slice(0, 120);
+  }
+  return null;
+}
+
+/**
  * Writes one row. Awaited by callers rather than fired and forgotten: on a
  * serverless host the function can be frozen the moment the response is
  * returned, and a detached insert would simply never land.
  */
 export async function logApiCall(input: ApiLogInput): Promise<void> {
   try {
+    const requestBody = bodyToJson(input.requestBody);
+    const responseBody = bodyToJson(input.responseBody);
+    const bodies = [requestBody, responseBody];
+
     const { error } = await getSupabaseAdminClient()
       .from("api_logs")
       .insert({
@@ -177,9 +254,9 @@ export async function logApiCall(input: ApiLogInput): Promise<void> {
         method: input.method.toUpperCase(),
         url: input.url,
         request_headers: headersToJson(input.requestHeaders) as never,
-        request_body: bodyToJson(input.requestBody) as never,
+        request_body: requestBody as never,
         response_headers: headersToJson(input.responseHeaders) as never,
-        response_body: bodyToJson(input.responseBody) as never,
+        response_body: responseBody as never,
         status_code: input.statusCode ?? null,
         gateway_code: input.gatewayCode || null,
         outcome: input.outcome ?? null,
@@ -187,6 +264,8 @@ export async function logApiCall(input: ApiLogInput): Promise<void> {
         duration_ms: input.durationMs ?? null,
         error: input.error ?? null,
         user_id: input.userId ?? null,
+        transaction_id: firstOf(bodies, TRANSACTION_ID_KEYS),
+        user_key: firstOf(bodies, USER_KEY_KEYS),
       });
 
     if (error) console.warn("[api-logs] could not record call:", error.message);
@@ -199,8 +278,15 @@ export async function logApiCall(input: ApiLogInput): Promise<void> {
 export interface ApiLogQuery {
   direction?: ApiLogDirection;
   label?: string;
-  /** Matches the URL, the label or the gateway code. */
+  /**
+   * Free text across the URL, the operation, the gateway code and — the two
+   * that actually narrow anything down — the transaction id and user key.
+   */
   search?: string;
+  /** Exact transaction id. Cheaper and less ambiguous than the free-text field. */
+  transactionId?: string;
+  /** Exact user key / order reference. */
+  userKey?: string;
   limit?: number;
   offset?: number;
 }
@@ -222,13 +308,31 @@ export async function listApiLogs(query: ApiLogQuery = {}): Promise<ApiLogPage> 
 
   if (query.direction) request = request.eq("direction", query.direction);
   if (query.label) request = request.eq("label", query.label);
+  // Exact, and deliberately so: a transaction id is quoted to you in full, and
+  // a prefix match on one would silently pull in a neighbouring transaction.
+  if (query.transactionId?.trim()) {
+    request = request.eq("transaction_id", query.transactionId.trim());
+  }
+  if (query.userKey?.trim()) {
+    request = request.eq("user_key", query.userKey.trim());
+  }
   if (query.search) {
     // Commas separate the branches of an `or`, so one in the search term would
     // otherwise be read as a filter separator.
     const term = query.search.replace(/[,()]/g, " ").trim();
     if (term) {
       request = request.or(
-        `url.ilike.%${term}%,label.ilike.%${term}%,gateway_code.ilike.%${term}%`,
+        [
+          `url.ilike.%${term}%`,
+          `label.ilike.%${term}%`,
+          `gateway_code.ilike.%${term}%`,
+          // Pasting a transaction id or an order ref into the one box people
+          // actually use should find it, without them having to know which
+          // field it belongs in.
+          `transaction_id.ilike.%${term}%`,
+          `user_key.ilike.%${term}%`,
+          `request_id.ilike.%${term}%`,
+        ].join(","),
       );
     }
   }

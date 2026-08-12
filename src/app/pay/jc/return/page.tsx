@@ -9,8 +9,12 @@
 import Link from "next/link";
 
 import { JcFinalizer } from "@/components/JcFinalizer";
+import { logApiCall } from "@/lib/api-logs";
 import { codeMessage } from "@/lib/collection/codes";
 import { requireUser } from "@/lib/supabase/server";
+
+/** The gateway drives this URL, so each arrival is a real inbound call to log. */
+export const dynamic = "force-dynamic";
 
 export default async function JcReturnPage({
   searchParams,
@@ -21,6 +25,24 @@ export default async function JcReturnPage({
   const params = await searchParams;
   const orderRef = typeof params.orderId === "string" ? params.orderId : null;
   const status = typeof params.status === "string" ? params.status : null;
+
+  /**
+   * A return URL is a webhook that happens to arrive in a browser: the gateway
+   * chose the moment and the query string, and without a log line the trail for
+   * a JazzCash link has a hole in it exactly where the customer came back. Logged
+   * before anything is decided, so a redirect we could not interpret is still on
+   * the record.
+   */
+  await logApiCall({
+    direction: "inbound",
+    label: "webhook.jc.return",
+    method: "GET",
+    url: "/pay/jc/return",
+    requestBody: { query: params },
+    statusCode: 200,
+    outcome: status ? undefined : "pending",
+    gatewayCode: status,
+  });
 
   // 0003 and 0005 come back without a transactionId and there is nothing to
   // finalize — 0005 in particular means this wallet is already linked.

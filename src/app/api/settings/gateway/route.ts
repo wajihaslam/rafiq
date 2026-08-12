@@ -26,6 +26,14 @@ const schema = z.object({
   /** Not selectable: used by every token call whatever the flow is. */
   merchantIdTokenization: blankToNull,
   flow: blankToNull,
+  /**
+   * How a wallet link runs. Independent of `flow`. Absent and blank both mean
+   * "no override", so an older client that does not send the field keeps
+   * working instead of having its stored value rejected.
+   */
+  tokenizationSequence: blankToNull
+    .nullish()
+    .transform((v) => v ?? null),
   baseUrl: blankToNull,
 });
 

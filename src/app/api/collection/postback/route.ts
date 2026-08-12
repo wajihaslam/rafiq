@@ -120,6 +120,7 @@ async function handle(request: Request, body: string): Promise<Response> {
     await admin.from("transactions").insert({
       order_id: orderId,
       kind: "payment",
+      operation: "postback",
       gateway_transaction_id: gatewayTxnId,
       status_code: code,
       message: (payload.message as string) ?? null,

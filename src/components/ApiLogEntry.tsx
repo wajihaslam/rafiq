@@ -77,6 +77,17 @@ export function ApiLogEntry({ row }: { row: ApiLogRow }) {
           <Pill className={OUTCOME_STYLES.failure}>error</Pill>
         )}
 
+        {/* The two references worth reading off a collapsed row: they are what
+            ties this line to an order, and what you paste into the filters. */}
+        {row.user_key && (
+          <span className="font-mono text-xs text-slate-500">{row.user_key}</span>
+        )}
+        {row.transaction_id && (
+          <span className="font-mono text-xs text-slate-500">
+            txn {row.transaction_id}
+          </span>
+        )}
+
         <span className="ml-auto flex items-center gap-3 text-xs text-slate-500">
           {row.duration_ms !== null && <span>{row.duration_ms} ms</span>}
           <time dateTime={row.created_at}>
@@ -93,6 +104,32 @@ export function ApiLogEntry({ row }: { row: ApiLogRow }) {
             <>
               <dt className="text-slate-500">Request-Id</dt>
               <dd className="font-mono">{row.request_id}</dd>
+            </>
+          )}
+          {row.transaction_id && (
+            <>
+              <dt className="text-slate-500">Transaction ID</dt>
+              <dd className="font-mono">
+                <a
+                  className="underline"
+                  href={`/logs?txn=${encodeURIComponent(row.transaction_id)}`}
+                >
+                  {row.transaction_id}
+                </a>
+              </dd>
+            </>
+          )}
+          {row.user_key && (
+            <>
+              <dt className="text-slate-500">User key</dt>
+              <dd className="font-mono">
+                <a
+                  className="underline"
+                  href={`/logs?userKey=${encodeURIComponent(row.user_key)}`}
+                >
+                  {row.user_key}
+                </a>
+              </dd>
             </>
           )}
           <dt className="text-slate-500">Log entry</dt>

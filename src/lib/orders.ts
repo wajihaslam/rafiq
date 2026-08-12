@@ -7,9 +7,9 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
-import { classify, codeMessage } from "@/lib/collection/codes";
+import { classify, codeMessage, REFUND_SUBMITTED } from "@/lib/collection/codes";
 import type { GatewayCall } from "@/lib/collection/client";
-import type { OrderStatus, TxnKind } from "@/lib/db-types";
+import type { OrderStatus, TxnKind, TxnOperation } from "@/lib/db-types";
 
 /**
  * Order references double as the gateway's `userKey` / `orderId`, and §7 turns
@@ -67,21 +67,30 @@ export async function createOrder(input: CreateOrderInput) {
   return order;
 }
 
-/** Append a gateway exchange to the audit trail. */
+/**
+ * Append a gateway exchange to the audit trail.
+ *
+ * `operation` is required rather than inferred: initiate and verify are both
+ * `kind: "payment"`, and a step breadcrumb that had to tell them apart by
+ * inspecting the payload would be wrong exactly where it matters — a Non-OTP
+ * verify is byte-for-byte the shape of an initiate.
+ */
 export async function recordTransaction(params: {
   orderId: string | null;
   userId: string | null;
   kind: TxnKind;
+  operation: TxnOperation;
   call: Pick<GatewayCall<unknown>, "code" | "request" | "body">;
   gatewayTransactionId?: string | null;
   operatorId?: string | null;
 }) {
   const admin = getSupabaseAdminClient();
   const outcome = classify(params.call.code);
-  await admin.from("transactions").insert({
+  const { error } = await admin.from("transactions").insert({
     order_id: params.orderId,
     user_id: params.userId,
     kind: params.kind,
+    operation: params.operation,
     gateway_transaction_id: params.gatewayTransactionId ?? null,
     operator_id: params.operatorId ?? null,
     status_code: params.call.code || "",
@@ -90,6 +99,23 @@ export async function recordTransaction(params: {
     request: params.call.request as never,
     response: params.call.body as never,
   });
+
+  /**
+   * Deliberately loud but not fatal. This table is the record of what happened
+   * to money, so losing a row matters — but the gateway call has already been
+   * made by the time we get here, and throwing now would report a payment as
+   * failed that may well have succeeded.
+   *
+   * The likeliest cause by far is a schema that is behind the code: migration
+   * 0009 adds `operation`, and without it every insert here is rejected while
+   * everything else carries on working. Silence was how that went unnoticed.
+   */
+  if (error) {
+    console.error(
+      `[orders] could not record ${params.operation} (${params.call.code}):`,
+      error.message,
+    );
+  }
 }
 
 /**
@@ -146,4 +172,41 @@ export async function applyOutcome(params: {
 
   await admin.from("orders").update(patch).eq("id", params.orderId);
   return next;
+}
+
+/**
+ * Moves an order according to a *refund* answer, which `applyOutcome` cannot:
+ * a paid order is terminal there, and rightly so — a late duplicate payment
+ * response must never disturb it. A refund is the one thing that legitimately
+ * moves an order on from `paid`, so it gets its own door.
+ *
+ * Success is **0135**, not 0000 (§4.8), and it means *submitted* — the money
+ * comes back when the gateway says so, which arrives later as a postback. A
+ * refund the gateway refused leaves the order exactly where it was: it is still
+ * paid, and saying otherwise would invent a refund that never happened.
+ */
+export async function applyRefundOutcome(params: {
+  orderId: string;
+  code: string;
+}): Promise<OrderStatus> {
+  const admin = getSupabaseAdminClient();
+  if (params.code !== REFUND_SUBMITTED) {
+    const { data } = await admin
+      .from("orders")
+      .select("status")
+      .eq("id", params.orderId)
+      .single();
+    return (data?.status as OrderStatus) ?? "paid";
+  }
+
+  await admin
+    .from("orders")
+    .update({
+      status: "refund_submitted" satisfies OrderStatus,
+      status_code: params.code,
+      message: codeMessage(params.code),
+    })
+    .eq("id", params.orderId);
+
+  return "refund_submitted";
 }

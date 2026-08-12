@@ -88,7 +88,7 @@ export default async function SettingsPage() {
           )}
           {walletsMissing.length > 0 && (
             <p className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">
-              Saved wallets are switched off — wallet linking, one-click checkout
+              Saved wallets are switched off — wallet linking, direct charges
               and subscription renewals need the tokenization merchant.
             </p>
           )}
@@ -99,6 +99,7 @@ export default async function SettingsPage() {
         effective={{
           merchantId: effective.merchantId,
           flow: effective.flow,
+          tokenizationSequence: effective.tokenizationSequence,
           baseUrl: effective.baseUrl,
           merchants: effective.merchants,
         }}
@@ -107,6 +108,7 @@ export default async function SettingsPage() {
           merchantIdNonOtp: row?.merchant_id_non_otp ?? null,
           merchantIdTokenization: row?.merchant_id_tokenization ?? null,
           flow: row?.flow ?? null,
+          tokenizationSequence: row?.tokenization_sequence ?? null,
           baseUrl: row?.base_url ?? null,
         }}
       />
@@ -151,6 +153,12 @@ export default async function SettingsPage() {
             "Non-OTP"
           )}{" "}
           <span className="text-xs text-slate-500">({effective.source.flow})</span>
+        </dd>
+        <dt className="text-slate-500">In use — Wallet linking</dt>
+        <dd>
+          {effective.tokenizationSequence === "verify_only"
+            ? "verify only — no initiate"
+            : "initiate + verify"}
         </dd>
         <dt className="text-slate-500">In use — Base URL</dt>
         <dd className="break-all">

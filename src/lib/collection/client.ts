@@ -327,8 +327,8 @@ export async function finalize(
 }
 
 /**
- * §4.5 — charges a stored token with the customer absent. This is 1-click
- * checkout and the engine behind subscription renewals.
+ * §4.5 — charges a stored token with the customer absent. This is what a saved
+ * wallet's "Charge" does, and the engine behind subscription renewals.
  *
  * Tokenization merchant even though this moves money: the `sourceId` belongs to
  * the merchant that minted it, so charging it under the payment MID answers

@@ -1,12 +1,11 @@
 /**
- * Charges a saved wallet on demand (§4.5) — a top-up that goes through the
- * tokenization merchant and needs no cart, no OTP and no customer present.
+ * Charges a saved wallet on demand (§4.5) — a payment that goes through the
+ * tokenization merchant and needs no OTP and no customer present.
  *
- * This is the same direct-payment call the 1-click checkout and the subscription
- * charger make; the only difference is that the amount comes from the request
- * instead of from a cart or a plan. It deliberately does not touch the cart: a
- * recharge is not a cart checkout, and closing an open cart here would lose a
- * basket the customer is still filling.
+ * This is the same direct-payment call the subscription charger makes; the only
+ * difference is that the amount comes from the request instead of from a plan.
+ * The order it creates is `channel: "direct_payment"`, which is what puts it in
+ * the tokenization ledger rather than among the one-time payments.
  */
 
 import { z } from "zod";
@@ -74,6 +73,7 @@ export async function POST(
       orderId: order.id,
       userId: user.id,
       kind: "direct_payment",
+      operation: "direct_payment",
       call,
       gatewayTransactionId: call.body?.transactionId,
       operatorId: token.operator_id,
