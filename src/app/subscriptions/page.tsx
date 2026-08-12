@@ -3,7 +3,10 @@ import Link from "next/link";
 import { Money } from "@/components/Money";
 import { MySubscriptions } from "@/components/MySubscriptions";
 import { SubscribeButton } from "@/components/SubscribeButton";
-import { WalletSubscriptionPanel } from "@/components/WalletSubscriptionPanel";
+import {
+  WalletSubscriptionPanel,
+  type PanelSubscription,
+} from "@/components/WalletSubscriptionPanel";
 import { OPERATORS } from "@/lib/collection/types";
 import {
   getCurrentUser,
@@ -84,30 +87,37 @@ export default async function SubscriptionsPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             {([OPERATORS.easypaisa, OPERATORS.jazzcash] as const).map(
               (operatorId) => {
-                const token = wallets.find((w) => w.operator_id === operatorId);
-                const sub = mySubs.find(
-                  (s) => s.payment_tokens?.operator_id === operatorId,
+                // Several wallets may be linked on one operator; the panel picks
+                // between them, and each carries its own subscription.
+                const operatorWallets = wallets.filter(
+                  (w) => w.operator_id === operatorId,
                 );
+                const byToken: Record<string, PanelSubscription> = {};
+                for (const sub of mySubs) {
+                  if (sub.payment_tokens?.operator_id !== operatorId) continue;
+                  byToken[sub.payment_token_id] = {
+                    id: sub.id,
+                    status: sub.status,
+                    nextChargeAt: sub.next_charge_at,
+                    planId: sub.product_id,
+                  };
+                }
+
                 return (
                   <WalletSubscriptionPanel
                     key={operatorId}
                     operatorId={operatorId}
                     plans={panelPlans}
-                    token={token ? { id: token.id, msisdn: token.msisdn } : null}
+                    tokens={operatorWallets.map((w) => ({
+                      id: w.id,
+                      msisdn: w.msisdn,
+                      label: w.label,
+                    }))}
                     pendingOrderRef={
                       pending.find((r) => r.operator_id === operatorId)
                         ?.order_ref ?? null
                     }
-                    subscription={
-                      sub
-                        ? {
-                            id: sub.id,
-                            status: sub.status,
-                            nextChargeAt: sub.next_charge_at,
-                            planId: sub.product_id,
-                          }
-                        : null
-                    }
+                    subscriptionsByToken={byToken}
                   />
                 );
               },

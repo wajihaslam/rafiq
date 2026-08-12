@@ -5,29 +5,29 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { formatPkr } from "@/components/Money";
+import { StepTrail } from "@/components/StepTrail";
 import { OPERATOR_LABELS } from "@/lib/collection/types";
-
-export interface SavedWallet {
-  id: string;
-  operatorId: string;
-  msisdn: string;
-  label: string | null;
-}
-
-type Method = "saved" | "wallet" | "hosted";
+import { oneTimeSteps, type Flow } from "@/lib/steps";
+import type { TxnOperation } from "@/lib/db-types";
 
 /**
- * Pay for a single product without a cart: the CTA opens a modal that collects
- * just the payment details and, when the merchant is on the OTP flow, the OTP —
- * the customer never leaves the shop listing.
+ * Pay for a single product: one item, one payment, no cart.
+ *
+ * The modal is the payment's own step trail — Initiate → Verify → Inquire →
+ * Refund on the OTP flow, Verify → Inquire → Refund on Non-OTP — and every
+ * button is enabled by what has actually happened rather than by what the
+ * customer might want to do next. A step that cannot be taken says why.
+ *
+ * Which sequence applies is the *server's* answer, not a guess: the merchant is
+ * provisioned for exactly one flow, so the page passes it in.
  */
 export function PayProductButton({
   product,
-  savedWallets,
+  flow,
   signedIn,
 }: {
   product: { id: string; name: string; price: number };
-  savedWallets: SavedWallet[];
+  flow: Flow | null;
   signedIn: boolean;
 }) {
   const router = useRouter();
@@ -43,6 +43,17 @@ export function PayProductButton({
     );
   }
 
+  if (!flow) {
+    return (
+      <span
+        className="btn-ghost cursor-not-allowed opacity-60"
+        title="No payment flow is configured yet — an administrator can set one on the Configuration page."
+      >
+        Payments off
+      </span>
+    );
+  }
+
   return (
     <>
       <button type="button" className="btn-primary" onClick={() => setOpen(true)}>
@@ -51,9 +62,9 @@ export function PayProductButton({
       {open && (
         <PayModal
           product={product}
-          savedWallets={savedWallets}
+          flow={flow}
           onClose={() => setOpen(false)}
-          onPaid={(orderId) => router.push(`/orders/${orderId}`)}
+          onDone={(orderId) => router.push(`/orders/${orderId}`)}
         />
       )}
     </>
@@ -62,28 +73,29 @@ export function PayProductButton({
 
 function PayModal({
   product,
-  savedWallets,
+  flow,
   onClose,
-  onPaid,
+  onDone,
 }: {
   product: { id: string; name: string; price: number };
-  savedWallets: SavedWallet[];
+  flow: Flow;
   onClose: () => void;
-  onPaid: (orderId: string) => void;
+  onDone: (orderId: string) => void;
 }) {
-  const [method, setMethod] = useState<Method>(
-    savedWallets.length > 0 ? "saved" : "wallet",
-  );
-  const [savedId, setSavedId] = useState(savedWallets[0]?.id ?? "");
   const [operatorId, setOperatorId] = useState<"100007" | "100008">("100007");
   const [msisdn, setMsisdn] = useState("");
   const [qty, setQty] = useState(1);
+  const [otp, setOtp] = useState("");
 
   const [orderId, setOrderId] = useState<string | null>(null);
-  const [otp, setOtp] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [orderRef, setOrderRef] = useState<string | null>(null);
+  const [orderStatus, setOrderStatus] = useState("pending");
+  /** What has actually been called, which is what drives the trail. */
+  const [operations, setOperations] = useState<TxnOperation[]>([]);
+  const [needsOtp, setNeedsOtp] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
-    tone: "info" | "error";
+    tone: "info" | "error" | "good";
     text: string;
   } | null>(null);
 
@@ -97,80 +109,131 @@ function PayModal({
   }, [busy, onClose]);
 
   const total = Math.round(product.price * qty * 100) / 100;
+  const steps = oneTimeSteps({ flow, operations, orderStatus });
+  const started = orderId !== null;
 
-  async function pay() {
-    setBusy(true);
-    setNotice(null);
+  // --- what each CTA may do right now ------------------------------------
+  const canStart = !started && !busy && msisdn.trim().length >= 10;
+  const canVerify = started && needsOtp && !busy && otp.length >= 4;
+  const canInquire = started && orderStatus === "pending" && !busy && !needsOtp;
+  const canRefund = started && orderStatus === "paid" && !busy;
 
-    const response = await fetch("/api/checkout/product", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        productId: product.id,
-        qty,
-        method,
-        ...(method === "saved" ? { savedTokenId: savedId } : {}),
-        ...(method === "wallet" ? { operatorId, msisdn } : {}),
-      }),
-    });
-    const payload = await response.json();
-    setBusy(false);
-
+  function report(payload: {
+    ok: boolean;
+    message?: string;
+    indeterminate?: boolean;
+    data?: { outcome?: string; message?: string };
+  }) {
     if (!payload.ok) {
       // An indeterminate answer is not a failure — say so in those words.
       setNotice({
         tone: payload.indeterminate ? "info" : "error",
-        text: payload.message,
+        text: payload.message ?? "Something went wrong.",
       });
-      return;
+      return false;
     }
-
-    if (payload.data.redirectTo) {
-      window.location.href = payload.data.redirectTo;
-      return;
-    }
-
-    if (payload.data.needsOtp) {
-      setOrderId(payload.data.orderId);
-      setNotice({
-        tone: "info",
-        text: "We sent an OTP to your mobile. Enter it below to confirm payment.",
-      });
-      return;
-    }
-
-    onPaid(payload.data.orderId);
+    const outcome = payload.data?.outcome;
+    setNotice({
+      tone: outcome === "failure" ? "error" : outcome === "success" ? "good" : "info",
+      text: payload.data?.message ?? "Done.",
+    });
+    return true;
   }
 
-  async function confirmOtp() {
-    if (!orderId) return;
-    setBusy(true);
+  /** Step 1 — initiate (OTP flow) or verify outright (Non-OTP). */
+  async function start() {
+    setBusy("start");
     setNotice(null);
-
-    const response = await fetch("/api/checkout/product/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId, otp }),
-    });
-    const payload = await response.json();
-    setBusy(false);
-
-    if (!payload.ok) {
-      setNotice({
-        tone: payload.indeterminate ? "info" : "error",
-        text: payload.message,
+    try {
+      const response = await fetch("/api/checkout/product", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productId: product.id, qty, operatorId, msisdn }),
       });
-      return;
-    }
+      const payload = await response.json();
+      if (!report(payload)) return;
 
-    // A wrong OTP is recoverable: keep the customer on this step.
-    if (payload.data.canRetryOtp) {
+      setOrderId(payload.data.orderId);
+      setOrderRef(payload.data.orderRef);
+      setOrderStatus(payload.data.orderStatus);
+      setOperations([flow === "otp" ? "initiate" : "verify"]);
+      setNeedsOtp(Boolean(payload.data.needsOtp));
+
+      if (payload.data.needsOtp) {
+        setNotice({
+          tone: "info",
+          text: "We sent an OTP to your mobile. Enter it below to confirm payment.",
+        });
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Step 2 — verify with the OTP. Only ever reached on the OTP flow. */
+  async function verify() {
+    if (!orderId) return;
+    setBusy("verify");
+    setNotice(null);
+    try {
+      const response = await fetch("/api/checkout/product/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId, otp }),
+      });
+      const payload = await response.json();
+      if (!report(payload)) return;
+
+      // A wrong OTP is recoverable: keep the customer on this step.
+      if (payload.data.canRetryOtp) {
+        setOtp("");
+        setNotice({ tone: "error", text: payload.data.message });
+        return;
+      }
+
       setOtp("");
-      setNotice({ tone: "error", text: payload.data.message });
-      return;
+      setNeedsOtp(false);
+      setOrderStatus(payload.data.orderStatus);
+      setOperations((prev) => [...prev, "verify"]);
+    } finally {
+      setBusy(null);
     }
+  }
 
-    onPaid(orderId);
+  /** Step 3 — inquire. This is what actually settles a pending order (§6). */
+  async function inquire() {
+    if (!orderId) return;
+    setBusy("inquire");
+    setNotice(null);
+    try {
+      const response = await fetch(`/api/orders/${orderId}/inquire`, {
+        method: "POST",
+      });
+      const payload = await response.json();
+      if (!report(payload)) return;
+      setOrderStatus(payload.data.orderStatus);
+      setOperations((prev) => [...prev, "inquiry"]);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Step 4 — refund. Success is 0135, and it means submitted, not returned. */
+  async function refund() {
+    if (!orderId) return;
+    setBusy("refund");
+    setNotice(null);
+    try {
+      const response = await fetch(`/api/orders/${orderId}/refund`, {
+        method: "POST",
+      });
+      const payload = await response.json();
+      if (!report(payload)) return;
+      setOrderStatus(payload.data.orderStatus);
+      setOperations((prev) => [...prev, "refund"]);
+    } finally {
+      setBusy(null);
+    }
   }
 
   return (
@@ -183,64 +246,49 @@ function PayModal({
         if (e.target === e.currentTarget && !busy) onClose();
       }}
     >
-      <div className="card max-h-[90vh] w-full max-w-md overflow-y-auto shadow-xl">
+      <div className="card max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto shadow-xl">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="font-medium">{product.name}</h2>
             <p className="text-sm text-slate-500">
               {formatPkr(total)}
               {qty > 1 ? ` · ${qty} × ${formatPkr(product.price)}` : ""}
+              {orderRef ? ` · ${orderRef}` : ""}
             </p>
           </div>
           <button
             type="button"
             className="text-sm text-slate-500 hover:underline disabled:opacity-50"
-            disabled={busy}
+            disabled={Boolean(busy)}
             onClick={onClose}
           >
             Close
           </button>
         </div>
 
+        <div>
+          <p className="mb-1.5 text-xs uppercase tracking-wide text-slate-400">
+            One-time payment · {flow === "otp" ? "OTP flow" : "Non-OTP flow"}
+          </p>
+          <StepTrail steps={steps} />
+        </div>
+
         {notice && (
           <p
-            className={`mt-4 rounded-lg px-3 py-2 text-sm ${
+            className={`rounded-lg px-3 py-2 text-sm ${
               notice.tone === "error"
                 ? "bg-rose-50 text-rose-800 dark:bg-rose-500/10 dark:text-rose-300"
-                : "bg-amber-50 text-amber-900 dark:bg-amber-500/10 dark:text-amber-200"
+                : notice.tone === "good"
+                  ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300"
+                  : "bg-amber-50 text-amber-900 dark:bg-amber-500/10 dark:text-amber-200"
             }`}
           >
             {notice.text}
           </p>
         )}
 
-        {orderId ? (
-          <div className="mt-4 space-y-4">
-            <div>
-              <label className="label" htmlFor="pay-otp">
-                One-time password
-              </label>
-              <input
-                id="pay-otp"
-                className="input"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                value={otp}
-                onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
-                placeholder="1234"
-              />
-            </div>
-            <button
-              type="button"
-              className="btn-primary w-full"
-              disabled={busy || otp.length < 4}
-              onClick={confirmOtp}
-            >
-              {busy ? "Confirming…" : `Confirm ${formatPkr(total)}`}
-            </button>
-          </div>
-        ) : (
-          <div className="mt-4 space-y-4">
+        {!started && (
+          <>
             <div>
               <label className="label" htmlFor={`qty-${product.id}`}>
                 Quantity
@@ -257,112 +305,117 @@ function PayModal({
               />
             </div>
 
-            <div className="space-y-2">
-              <span className="label">How would you like to pay?</span>
-
-              {savedWallets.length > 0 && (
-                <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-                  <input
-                    type="radio"
-                    name={`pay-method-${product.id}`}
-                    className="mt-1"
-                    checked={method === "saved"}
-                    onChange={() => setMethod("saved")}
-                  />
-                  <div className="flex-1 space-y-2">
-                    <p className="text-sm font-medium">
-                      Pay in one click — no OTP
-                    </p>
-                    {method === "saved" && (
-                      <select
-                        className="input"
-                        value={savedId}
-                        onChange={(e) => setSavedId(e.target.value)}
-                      >
-                        {savedWallets.map((w) => (
-                          <option key={w.id} value={w.id}>
-                            {OPERATOR_LABELS[w.operatorId as "100007" | "100008"]}{" "}
-                            · {w.msisdn}
-                            {w.label ? ` · ${w.label}` : ""}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                  </div>
-                </label>
-              )}
-
-              <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-                <input
-                  type="radio"
-                  name={`pay-method-${product.id}`}
-                  className="mt-1"
-                  checked={method === "wallet"}
-                  onChange={() => setMethod("wallet")}
-                />
-                <div className="flex-1 space-y-3">
-                  <p className="text-sm font-medium">Mobile wallet</p>
-                  {method === "wallet" && (
-                    <>
-                      <div className="flex gap-2">
-                        {(["100007", "100008"] as const).map((id) => (
-                          <button
-                            key={id}
-                            type="button"
-                            onClick={() => setOperatorId(id)}
-                            className={
-                              operatorId === id ? "btn-primary" : "btn-ghost"
-                            }
-                          >
-                            {OPERATOR_LABELS[id]}
-                          </button>
-                        ))}
-                      </div>
-                      <input
-                        className="input"
-                        inputMode="tel"
-                        aria-label="Mobile number"
-                        value={msisdn}
-                        onChange={(e) => setMsisdn(e.target.value)}
-                        placeholder="03001234567"
-                      />
-                    </>
-                  )}
-                </div>
-              </label>
-
-              <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-                <input
-                  type="radio"
-                  name={`pay-method-${product.id}`}
-                  className="mt-1"
-                  checked={method === "hosted"}
-                  onChange={() => setMethod("hosted")}
-                />
-                <div>
-                  <p className="text-sm font-medium">
-                    Pay on the gateway&apos;s page
-                  </p>
-                  <p className="text-sm text-slate-500">
-                    We&apos;ll take you there and bring you back.
-                  </p>
-                </div>
-              </label>
+            <div>
+              <span className="label">Wallet</span>
+              <div className="flex gap-2">
+                {(["100007", "100008"] as const).map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setOperatorId(id)}
+                    className={operatorId === id ? "btn-primary" : "btn-ghost"}
+                  >
+                    {OPERATOR_LABELS[id]}
+                  </button>
+                ))}
+              </div>
             </div>
 
+            <div>
+              <label className="label" htmlFor={`msisdn-${product.id}`}>
+                Mobile number
+              </label>
+              <input
+                id={`msisdn-${product.id}`}
+                className="input"
+                inputMode="tel"
+                value={msisdn}
+                onChange={(e) => setMsisdn(e.target.value)}
+                placeholder="03001234567"
+              />
+            </div>
+          </>
+        )}
+
+        {needsOtp && (
+          <div>
+            <label className="label" htmlFor={`otp-${product.id}`}>
+              One-time password
+            </label>
+            <input
+              id={`otp-${product.id}`}
+              className="input"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={otp}
+              onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
+              placeholder="1234"
+            />
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={!canStart}
+            onClick={start}
+          >
+            {busy === "start"
+              ? "Working…"
+              : started
+                ? flow === "otp"
+                  ? "Initiated ✓"
+                  : "Verified ✓"
+                : flow === "otp"
+                  ? `Initiate ${formatPkr(total)}`
+                  : `Pay ${formatPkr(total)}`}
+          </button>
+
+          {/* Only the OTP flow has a second call to make. Rendering a Verify
+              button on Non-OTP would offer a step that does not exist there. */}
+          {flow === "otp" && (
             <button
               type="button"
-              className="btn-primary w-full"
-              disabled={
-                busy ||
-                (method === "wallet" && msisdn.trim().length < 10) ||
-                (method === "saved" && !savedId)
-              }
-              onClick={pay}
+              className="btn-ghost"
+              disabled={!canVerify}
+              onClick={verify}
             >
-              {busy ? "Working…" : `Pay ${formatPkr(total)}`}
+              {busy === "verify" ? "Confirming…" : needsOtp ? "Verify" : "Verified ✓"}
             </button>
-          </div>
+          )}
+
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={!canInquire}
+            onClick={inquire}
+            title={
+              canInquire ? undefined : "Available while the payment is unsettled."
+            }
+          >
+            {busy === "inquire" ? "Inquiring…" : "Inquire"}
+          </button>
+
+          <button
+            type="button"
+            className="btn-ghost text-rose-600"
+            disabled={!canRefund}
+            onClick={refund}
+            title={canRefund ? undefined : "Available once the payment has settled."}
+          >
+            {busy === "refund" ? "Refunding…" : "Refund"}
+          </button>
+        </div>
+
+        {started && (
+          <button
+            type="button"
+            className="text-sm text-slate-500 hover:underline"
+            onClick={() => onDone(orderId!)}
+          >
+            Open this payment →
+          </button>
         )}
       </div>
     </div>

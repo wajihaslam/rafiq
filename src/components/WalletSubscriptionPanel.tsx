@@ -17,6 +17,7 @@ export interface PanelPlan {
 export interface PanelToken {
   id: string;
   msisdn: string;
+  label: string | null;
 }
 
 export interface PanelSubscription {
@@ -27,10 +28,14 @@ export interface PanelSubscription {
 }
 
 /**
- * One wallet, one panel: subscribe the number → get a token → pay → verify →
+ * One operator, one panel: subscribe the number → get a token → pay → verify →
  * unsubscribe, each as its own CTA. Every CTA is enabled or disabled purely by
- * what we know about this operator — there is no step to guess at, because a
- * step you cannot yet take is visibly unavailable rather than silently broken.
+ * what we know about this wallet — there is no step to guess at, because a step
+ * you cannot yet take is visibly unavailable rather than silently broken.
+ *
+ * Several wallets may be linked on the same operator, so the panel picks one and
+ * every CTA below acts on *that* wallet: its own token, its own subscription.
+ * Linking another number stays available from /wallets.
  *
  * The two operators genuinely differ: Easypaisa tokenizes over JSON with an OTP
  * we collect here, JazzCash hands the browser to a hosted page and comes back.
@@ -38,19 +43,24 @@ export interface PanelSubscription {
 export function WalletSubscriptionPanel({
   operatorId,
   plans,
-  token,
+  tokens,
   pendingOrderRef,
-  subscription,
+  subscriptionsByToken,
 }: {
   operatorId: "100007" | "100008";
   plans: PanelPlan[];
-  token: PanelToken | null;
+  /** Every wallet linked on this operator, newest first. */
+  tokens: PanelToken[];
   /** An Easypaisa link that has been started but not yet OTP-verified. */
   pendingOrderRef: string | null;
-  subscription: PanelSubscription | null;
+  subscriptionsByToken: Record<string, PanelSubscription>;
 }) {
   const router = useRouter();
   const hosted = operatorId === "100008";
+
+  const [tokenId, setTokenId] = useState(tokens[0]?.id ?? "");
+  const token = tokens.find((t) => t.id === tokenId) ?? tokens[0] ?? null;
+  const subscription = token ? (subscriptionsByToken[token.id] ?? null) : null;
 
   const [planId, setPlanId] = useState(subscription?.planId ?? plans[0]?.id ?? "");
   const [msisdn, setMsisdn] = useState("");
@@ -238,6 +248,29 @@ export function WalletSubscriptionPanel({
           {liveSub ? `Subscribed · ${liveSub.status}` : "Not subscribed"}
         </span>
       </div>
+
+      {/* Only worth showing once there is a choice to make; with one wallet the
+          heading above already names it. */}
+      {tokens.length > 1 && (
+        <div>
+          <label className="label" htmlFor={`wallet-${operatorId}`}>
+            Wallet
+          </label>
+          <select
+            id={`wallet-${operatorId}`}
+            className="input"
+            value={token?.id ?? ""}
+            onChange={(e) => setTokenId(e.target.value)}
+          >
+            {tokens.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.msisdn}
+                {t.label ? ` · ${t.label}` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {plans.length > 1 && (
         <div>

@@ -7,8 +7,9 @@
 
 import { z } from "zod";
 
-import { err, fromGateway, handleRouteError } from "@/lib/api";
+import { err, fromGateway, handleRouteError, ok } from "@/lib/api";
 import * as gateway from "@/lib/collection/client";
+import { codeMessage } from "@/lib/collection/codes";
 import { recordTransaction } from "@/lib/orders";
 import { getSupabaseAdminClient, requireUser } from "@/lib/supabase/server";
 
@@ -38,13 +39,17 @@ export async function POST(request: Request) {
       orderId: null,
       userId: user.id,
       kind: "tokenization",
+      operation: "finalize",
       call,
       gatewayTransactionId: call.body?.transactionId,
       operatorId: reg.operator_id,
     });
 
     const sourceId = call.body?.sourceId;
-    if (call.code === "0000" && sourceId) {
+    // The token is the evidence, not the code — this gateway has been seen to
+    // return a good sourceId alongside a non-zero status, and throwing it away
+    // would strand a wallet the customer has already consented to.
+    if (sourceId) {
       const { error } = await admin.from("payment_tokens").insert({
         user_id: user.id,
         operator_id: reg.operator_id,
@@ -70,7 +75,17 @@ export async function POST(request: Request) {
         .eq("id", reg.id);
     }
 
-    return fromGateway(call.code, { linked: Boolean(sourceId) });
+    if (sourceId) {
+      return ok({
+        code: call.code,
+        outcome: "success",
+        message: "Wallet linked.",
+        gatewayMessage: codeMessage(call.code),
+        linked: true,
+      });
+    }
+
+    return fromGateway(call.code, { linked: false });
   } catch (error) {
     return handleRouteError(error);
   }

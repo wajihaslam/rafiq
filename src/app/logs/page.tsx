@@ -44,6 +44,8 @@ export default async function LogsPage({
       : undefined;
   const label = one(params.label) || undefined;
   const search = one(params.q) || undefined;
+  const transactionId = one(params.txn) || undefined;
+  const userKey = one(params.userKey) || undefined;
   const page = Math.max(Number(one(params.page)) || 1, 1);
 
   const [{ rows, total }, labels] = await Promise.all([
@@ -51,6 +53,8 @@ export default async function LogsPage({
       direction,
       label,
       search,
+      transactionId,
+      userKey,
       limit: PAGE_SIZE,
       offset: (page - 1) * PAGE_SIZE,
     }),
@@ -62,7 +66,14 @@ export default async function LogsPage({
   /** Preserves the current filters while changing one of them. */
   const href = (patch: Record<string, string | undefined>) => {
     const next = new URLSearchParams();
-    const merged = { direction: directionParam, label, q: search, ...patch };
+    const merged = {
+      direction: directionParam,
+      label,
+      q: search,
+      txn: transactionId,
+      userKey,
+      ...patch,
+    };
     for (const [key, value] of Object.entries(merged)) {
       if (value) next.set(key, value);
     }
@@ -75,8 +86,10 @@ export default async function LogsPage({
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">API call log</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Every request this app sends to the Collection gateway, and everything
-          sent to the webhook catcher. Newest first.{" "}
+          Every request this app sends to the Collection gateway, and every
+          webhook sent to us — the catcher, the postback endpoint and the
+          gateway&apos;s return URLs alike. Newest first, searchable by
+          transaction id and user key.{" "}
           <Link href="/settings" className="underline">
             Configuration
           </Link>{" "}
@@ -95,7 +108,36 @@ export default async function LogsPage({
               name="q"
               className="input"
               defaultValue={search ?? ""}
-              placeholder="URL, operation or gateway code"
+              placeholder="URL, operation, code, transaction id or user key"
+            />
+          </div>
+
+          {/* The two exact fields sit alongside the free-text box rather than
+              replacing it: a transaction id quoted by the gateway is worth
+              matching exactly, but pasting one into "Search" should still work. */}
+          <div>
+            <label className="label" htmlFor="log-txn">
+              Transaction ID
+            </label>
+            <input
+              id="log-txn"
+              name="txn"
+              className="input"
+              defaultValue={transactionId ?? ""}
+              placeholder="95190001"
+            />
+          </div>
+
+          <div>
+            <label className="label" htmlFor="log-user-key">
+              User key
+            </label>
+            <input
+              id="log-user-key"
+              name="userKey"
+              className="input"
+              defaultValue={userKey ?? ""}
+              placeholder="RFQ-0123456789A"
             />
           </div>
 
@@ -137,12 +179,30 @@ export default async function LogsPage({
           <button type="submit" className="btn-primary">
             Apply
           </button>
-          {(direction || label || search) && (
+          {(direction || label || search || transactionId || userKey) && (
             <Link href="/logs" className="btn-ghost">
               Reset
             </Link>
           )}
         </form>
+
+        {/* One click for the question asked most often of this page: "did they
+            call us at all?" */}
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-slate-500">Quick view</span>
+          <Link
+            href="/logs?direction=inbound"
+            className={direction === "inbound" ? "btn-primary" : "btn-ghost"}
+          >
+            Webhooks received
+          </Link>
+          <Link
+            href="/logs?direction=outbound"
+            className={direction === "outbound" ? "btn-primary" : "btn-ghost"}
+          >
+            Calls we made
+          </Link>
+        </div>
 
         <ApiLogControls total={total} />
       </div>
@@ -150,7 +210,12 @@ export default async function LogsPage({
       <div className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-800">
         {rows.length === 0 ? (
           <p className="px-4 py-10 text-center text-sm text-slate-500">
-            {total === 0 && !direction && !label && !search
+            {total === 0 &&
+            !direction &&
+            !label &&
+            !search &&
+            !transactionId &&
+            !userKey
               ? "Nothing logged yet. Make a payment, or POST to the webhook catcher URL on the Configuration page."
               : "No calls match these filters."}
           </p>

@@ -1,14 +1,14 @@
 import Image from "next/image";
 import Link from "next/link";
 
-import { AddToCartButton } from "@/components/AddToCartButton";
 import { Money } from "@/components/Money";
 import { PayProductButton } from "@/components/PayProductButton";
+import { getGatewayConfigState } from "@/lib/settings";
 import {
   getCurrentUser,
   getSupabaseServerClient,
 } from "@/lib/supabase/server";
-import type { PaymentToken, Product } from "@/lib/db-types";
+import type { Product } from "@/lib/db-types";
 
 export default async function ShopPage() {
   const supabase = await getSupabaseServerClient();
@@ -23,31 +23,33 @@ export default async function ShopPage() {
 
   const products = (data ?? []) as Product[];
 
-  // Offered inside the pay modal, so a linked wallet is one click from here.
-  const { data: tokenRows } = user
-    ? await supabase
-        .from("payment_tokens")
-        .select("*")
-        .eq("status", "active")
-        .order("linked_at", { ascending: false })
-    : { data: null };
-
-  const savedWallets = ((tokenRows ?? []) as PaymentToken[]).map((t) => ({
-    id: t.id,
-    operatorId: t.operator_id,
-    msisdn: t.msisdn,
-    label: t.label,
-  }));
+  /**
+   * Which sequence a payment runs is a property of the merchant, not a choice —
+   * so the step trail is decided here and handed down. `getGatewayConfigState`
+   * never throws, so an unconfigured install still renders the shop and says
+   * payments are off rather than erroring on the catalogue.
+   */
+  const { flow } = await getGatewayConfigState();
 
   return (
     <div className="max-w-4xl space-y-8">
       <section>
         <h1 className="text-2xl font-semibold tracking-tight">Shop</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Pay for any item straight from this list — the payment details open
-          right here, no cart in between.{" "}
+          Pay for any item straight from this list — one item, one payment. Each
+          payment runs its own steps:{" "}
+          {flow === "otp"
+            ? "initiate, verify, inquire, refund"
+            : flow === "non_otp"
+              ? "verify, inquire, refund"
+              : "the flow is not configured yet"}
+          .{" "}
           <Link href="/subscriptions" className="text-brand-600 hover:underline">
             See subscription plans
+          </Link>
+          , or{" "}
+          <Link href="/wallets" className="text-brand-600 hover:underline">
+            charge a saved wallet
           </Link>
           .
         </p>
@@ -89,20 +91,15 @@ export default async function ShopPage() {
                 <Money amount={product.price} />
               </span>
 
-              <div className="flex items-center gap-2">
-                <PayProductButton
-                  product={{
-                    id: product.id,
-                    name: product.name,
-                    price: Number(product.price),
-                  }}
-                  savedWallets={savedWallets}
-                  signedIn={Boolean(user)}
-                />
-                {/* The cart still exists for anyone buying several things at
-                    once — it is just no longer the way through. */}
-                <AddToCartButton productId={product.id} />
-              </div>
+              <PayProductButton
+                product={{
+                  id: product.id,
+                  name: product.name,
+                  price: Number(product.price),
+                }}
+                flow={flow}
+                signedIn={Boolean(user)}
+              />
             </li>
           ))}
         </ul>

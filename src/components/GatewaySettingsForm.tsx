@@ -5,6 +5,7 @@ import { useState } from "react";
 
 type Flow = "otp" | "non_otp";
 type Slot = Flow | "tokenization";
+type TokenizationSequence = "initiate_verify" | "verify_only";
 
 export interface GatewaySettingsFormProps {
   /**
@@ -15,6 +16,7 @@ export interface GatewaySettingsFormProps {
   effective: {
     merchantId: string | null;
     flow: Flow | null;
+    tokenizationSequence: TokenizationSequence;
     baseUrl: string | null;
     /** All three merchants, resolved. Shown as the placeholder on each input. */
     merchants: Record<Slot, string | null>;
@@ -25,6 +27,7 @@ export interface GatewaySettingsFormProps {
     merchantIdNonOtp: string | null;
     merchantIdTokenization: string | null;
     flow: string | null;
+    tokenizationSequence: string | null;
     baseUrl: string | null;
   };
 }
@@ -32,6 +35,19 @@ export interface GatewaySettingsFormProps {
 const FLOWS: { value: Flow; label: string }[] = [
   { value: "otp", label: "OTP" },
   { value: "non_otp", label: "Non-OTP" },
+];
+
+const SEQUENCES: { value: TokenizationSequence; label: string; hint: string }[] = [
+  {
+    value: "initiate_verify",
+    label: "Initiate + verify",
+    hint: "Guide §2: initiate sends the OTP, verify redeems it and mints the token.",
+  },
+  {
+    value: "verify_only",
+    label: "Verify only",
+    hint: "For gateways that answer 0015 to any initiate with transactionType 8. Verify mints the token on its own.",
+  },
 ];
 
 /**
@@ -50,6 +66,7 @@ export function GatewaySettingsForm({ effective, stored }: GatewaySettingsFormPr
     tokenization: stored.merchantIdTokenization ?? "",
   });
   const [flow, setFlow] = useState(stored.flow ?? "");
+  const [sequence, setSequence] = useState(stored.tokenizationSequence ?? "");
   const [baseUrl, setBaseUrl] = useState(stored.baseUrl ?? "");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "info" | "error"; text: string } | null>(
@@ -73,6 +90,7 @@ export function GatewaySettingsForm({ effective, stored }: GatewaySettingsFormPr
         merchantIdNonOtp: merchantIds.non_otp,
         merchantIdTokenization: merchantIds.tokenization,
         flow,
+        tokenizationSequence: sequence,
         baseUrl,
       }),
     });
@@ -180,10 +198,52 @@ export function GatewaySettingsForm({ effective, stored }: GatewaySettingsFormPr
           placeholder={effective.merchants.tokenization ?? "7 digits — not set"}
         />
         <p className="mt-1.5 text-xs text-slate-500">
-          Always used for saved wallets — linking, one-click charges,
-          subscription renewals and delink — whichever flow is selected. A
+          Always used for saved wallets — linking, direct charges, refunds of
+          those charges, subscription renewals and delink — whichever flow is
+          selected. A
           token belongs to the merchant that minted it, so charging it under a
           payment MID answers 0003.
+        </p>
+      </div>
+
+      <div>
+        <span className="label">Tokenization sequence</span>
+        <p className="mb-2 text-xs text-slate-500">
+          How linking an Easypaisa wallet runs. Independent of the flow below —
+          it is a property of the gateway, not of the merchant. Leave it alone
+          unless linking answers <code>0015 Invalid-Flow</code>; that is the
+          symptom of a gateway that refuses <code>initiate</code> for
+          <code> transactionType 8</code>.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {SEQUENCES.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              title={option.hint}
+              className={sequence === option.value ? "btn-primary" : "btn-ghost"}
+              onClick={() => setSequence(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+          {sequence && (
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => setSequence("")}
+              title="Clear the override and fall back to the environment, then to initiate + verify."
+            >
+              Clear
+            </button>
+          )}
+        </div>
+        <p className="mt-1.5 text-xs text-slate-500">
+          In use: <strong>{effective.tokenizationSequence === "verify_only"
+            ? "verify only"
+            : "initiate + verify"}</strong>
+          {sequence ? "" : " (default — nothing stored)"}. JazzCash is unaffected:
+          it tokenizes through its hosted page either way.
         </p>
       </div>
 

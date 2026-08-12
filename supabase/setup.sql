@@ -512,6 +512,219 @@ update gateway_settings
        merchant_id_tokenization = coalesce(merchant_id_tokenization, '7000333')
  where id;
 
+-- >>> migrations/0007_test_amounts.sql
+
+-- ===========================================================================
+-- Rafiq — catalogue priced for live gateway testing
+--
+-- The seeded catalogue used realistic retail prices (Rs 149 – Rs 12,999), which
+-- is the wrong shape for testing against a real wallet: every run either
+-- exceeds a test wallet's balance or its per-transaction threshold, and 0009 /
+-- 0016 / 0027 crowd out the codes you actually wanted to exercise.
+--
+-- Everything is therefore re-priced into the Rs 5 – Rs 200 band, keeping the
+-- catalogue's relative order so the cart still reads sensibly: the cable is
+-- still the cheapest thing and the watch still the dearest.
+--
+-- Matched on slug, so this is safe to re-run and does not depend on ids.
+-- ===========================================================================
+
+update products set price = 5   where slug = 'usb-c-cable-2m';
+update products set price = 10  where slug = 'rafiq-plus-weekly';
+update products set price = 30  where slug = 'rafiq-plus-monthly';
+update products set price = 50  where slug = 'laptop-sleeve';
+update products set price = 100 where slug = 'power-bank-20k';
+update products set price = 150 where slug = 'wireless-earbuds';
+update products set price = 200 where slug = 'smart-watch';
+
+-- Existing subscriptions carry their own copy of the amount, taken at signup.
+-- Left alone on purpose: what a customer agreed to pay is not something a
+-- catalogue re-pricing gets to change behind their back. Cancel and re-subscribe
+-- to move an existing subscription onto the new amount.
+
+-- >>> migrations/0008_per_wallet_subscriptions.sql
+
+-- ===========================================================================
+-- Rafiq — one subscription per wallet, and one charge per period
+--
+-- Two corrections to 0001, both exposed by subscribing from the per-operator
+-- panels on /subscriptions:
+--
+--  1. `unique (user_id, product_id)` allowed a customer only one subscription
+--     to a plan across *all* their wallets, so subscribing the same plan on
+--     Easypaisa and on JazzCash was impossible — the second attempt came back
+--     0005. The wallet is part of what makes a subscription distinct, so it
+--     belongs in the key.
+--
+--  2. `subscription_charges` had no key on the period, so a manual "Pay now"
+--     racing the scheduler could bill the same period twice. Making the period
+--     unique per subscription turns that into a database error we can catch
+--     *before* any money moves, rather than a duplicate charge we discover
+--     afterwards.
+-- ===========================================================================
+
+alter table subscriptions
+  drop constraint if exists subscriptions_user_id_product_id_key;
+
+-- A customer may hold the same plan on two wallets, but not twice on one.
+alter table subscriptions
+  add constraint subscriptions_user_product_token_key
+  unique (user_id, product_id, payment_token_id);
+
+-- Existing duplicate periods, if any, are collapsed first — keeping the oldest
+-- row, which is the charge that actually ran.
+delete from subscription_charges c
+using subscription_charges keep
+where c.subscription_id = keep.subscription_id
+  and c.period_start    = keep.period_start
+  -- id breaks the tie when two rows share a timestamp, so exactly one survives
+  and (c.created_at, c.id) > (keep.created_at, keep.id);
+
+alter table subscription_charges
+  add constraint subscription_charges_period_key
+  unique (subscription_id, period_start);
+
+-- >>> migrations/0009_operations_and_log_keys.sql
+
+-- ===========================================================================
+-- Rafiq — name the operation on every gateway exchange, and make the API log
+--         searchable by the two references a tester actually has
+--
+-- Two additions, both in service of "what step is this payment on?".
+--
+--  1. `transactions.kind` says what a call was *about* (a payment, a
+--     tokenization) but not what it *did*. Initiate and verify are both
+--     `kind = 'payment'`, so a breadcrumb could only guess at the step by
+--     counting rows and reading tea leaves out of the request payload. The
+--     operation is known at the call site, so it is recorded there instead.
+--
+--  2. The API log could be searched by URL, operation and gateway code — none
+--     of which narrow anything down when every call is `collection.verify`
+--     against the same host. The two references that *do* identify one
+--     conversation are the gateway's `transactionId` and our own `userKey`,
+--     and both were buried inside jsonb. They are lifted into their own
+--     columns on the way in, so the search is an indexed equality rather than
+--     a scan through every stored body.
+-- ===========================================================================
+
+-- Every table below is unqualified, as everywhere else in this directory. Said
+-- explicitly so a client with a different default cannot turn "wrong schema"
+-- into "relation does not exist" — which reads exactly like a missing table.
+set search_path = public;
+
+-- --- transactions.operation -------------------------------------------------
+alter table transactions add column if not exists operation text;
+
+comment on column transactions.operation is
+  'The gateway call this row records: initiate | verify | finalize | direct_payment | inquiry | refund | delink | postback. Set at the call site; null on rows written before migration 0009.';
+
+create index if not exists transactions_operation_idx
+  on transactions (operation, created_at desc);
+
+-- Best-effort backfill. `kind` settles three of them outright; the rest are
+-- inferred from the payload we actually sent, which is the only evidence left.
+-- Initiate and a Non-OTP verify are genuinely indistinguishable by payload —
+-- both carry msisdn and transactionType and nothing else — so the order's
+-- channel breaks that tie, and rows with no order stay null rather than guess.
+update transactions t
+   set operation = case
+     when t.kind = 'delink'         then 'delink'
+     when t.kind = 'refund'         then 'refund'
+     when t.kind = 'direct_payment' then 'direct_payment'
+     when t.request ->> 'sourceId'      is not null then 'direct_payment'
+     when t.request ->> 'otp'           is not null then 'verify'
+     when t.request ->> 'orderId'       is not null
+      and t.request ->> 'msisdn'        is not null then 'finalize'
+     when t.request ->> 'transactionId' is not null
+      and t.request ->> 'msisdn'        is null     then 'inquiry'
+     when t.request ->> 'transactionId' is not null then 'verify'
+     when t.request is null                         then 'postback'
+     -- A correlated read rather than a join: a row with no order must not be
+     -- paired with an arbitrary one, which is what `or order_id is null` in a
+     -- FROM clause would silently do.
+     when (select o.channel from orders o where o.id = t.order_id)
+            = 'wallet_non_otp'                      then 'verify'
+     when t.request ->> 'transactionType' is not null then 'initiate'
+     else null
+   end
+ where t.operation is null;
+
+-- --- api_logs: the two references worth searching by ------------------------
+alter table api_logs add column if not exists transaction_id text;
+alter table api_logs add column if not exists user_key text;
+
+comment on column api_logs.transaction_id is
+  'The gateway transactionId seen anywhere in this exchange. Lifted out of the bodies at write time so it can be indexed.';
+comment on column api_logs.user_key is
+  'Our own reference for the exchange — userKey on wallet calls, orderId on hosted and finalize calls.';
+
+create index if not exists api_logs_transaction_id_idx
+  on api_logs (transaction_id, created_at desc);
+create index if not exists api_logs_user_key_idx
+  on api_logs (user_key, created_at desc);
+
+-- Backfill from the stored bodies. Inquiry nests its answer one level down,
+-- hence the third branch on each.
+update api_logs
+   set transaction_id = coalesce(
+         request_body  ->> 'transactionId',
+         response_body ->> 'transactionId',
+         response_body -> 'transaction' ->> 'transactionId'
+       ),
+       user_key = coalesce(
+         request_body  ->> 'userKey',
+         request_body  ->> 'orderId',
+         request_body  ->> 'OrderId',
+         response_body ->> 'userKey',
+         response_body ->> 'orderId'
+       )
+ where transaction_id is null
+   and user_key is null;
+
+-- >>> migrations/0010_tokenization_sequence.sql
+
+-- ===========================================================================
+-- Rafiq — which sequence tokenization runs
+--
+-- Guide §2 says tokenization is *exempt* from the flow split: linking a wallet
+-- always runs `initiate` → `verify` with an OTP, on both flows. The app was
+-- built to that, and hard-coded it.
+--
+-- The gateway at 3.127.43.66:8001 disagrees. Probed directly:
+--
+--   initiate  transactionType 8, MID 7000333  ->  0015 Invalid-Flow
+--   initiate  transactionType 8, MID 7000222  ->  0015 Invalid-Flow
+--   initiate  transactionType 0, MID 7000333  ->  0000 Success + transactionId
+--   verify    transactionType 8, no otp       ->  0011 Invalid-OTP
+--   verify    transactionType 8, with otp     ->  sourceId minted
+--
+-- So `initiate` is refused whenever transactionType is 8, on every merchant,
+-- whatever flow it is on — while `verify` alone mints the token. Note the third
+-- line: the same MID accepts `initiate` for an ordinary payment, so this is not
+-- a merchant provisioned on Non-OTP. It is tokenization specifically.
+--
+-- Which of the two is true of *your* gateway is a fact about the deployment, not
+-- a preference, so it becomes a setting rather than a guess or a retry. The
+-- default is `initiate_verify` — the documented behaviour — so a gateway that
+-- follows the guide is unaffected by this migration.
+-- ===========================================================================
+
+set search_path = public;
+
+alter table gateway_settings
+  add column if not exists tokenization_sequence text
+    check (tokenization_sequence is null
+           or tokenization_sequence in ('initiate_verify', 'verify_only'));
+
+comment on column gateway_settings.tokenization_sequence is
+  'How an Easypaisa wallet link runs: initiate_verify (guide §2 — initiate sends the OTP, verify redeems it) or verify_only (initiate answers 0015 for transactionType 8; verify with an OTP mints the token on its own). Null falls back to COLLECTION_TOKENIZATION_SEQUENCE, then to initiate_verify.';
+
+-- This deployment's gateway is the verify_only kind, as probed above. Set only
+-- where nothing has been chosen, so /settings stays the authority.
+update gateway_settings
+   set tokenization_sequence = coalesce(tokenization_sequence, 'verify_only')
+ where id;
+
 -- >>> seed.sql
 
 -- Demo catalogue. Prices are PKR with at most 2 decimals — the gateway
@@ -521,34 +734,34 @@ insert into products (slug, name, description, image_url, price, kind, interval_
   ('wireless-earbuds', 'Wireless Earbuds',
    'Bluetooth 5.3 earbuds with charging case and 24h total playback.',
    'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=800&q=80',
-   4999.00, 'one_time', null),
+   150.00, 'one_time', null),
 
   ('power-bank-20k', '20,000 mAh Power Bank',
    'Dual USB-C PD output, charges a phone four times over.',
    'https://images.unsplash.com/photo-1609091839311-d5365f9ff1c5?w=800&q=80',
-   3499.00, 'one_time', null),
+   100.00, 'one_time', null),
 
   ('smart-watch', 'Smart Watch Series 4',
    'AMOLED display, heart-rate and SpO2 tracking, 7-day battery.',
    'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800&q=80',
-   12999.00, 'one_time', null),
+   200.00, 'one_time', null),
 
   ('usb-c-cable-2m', 'USB-C Braided Cable (2m)',
    '60W fast-charge braided cable, tangle free.',
    'https://images.unsplash.com/photo-1601524909162-ae8725290836?w=800&q=80',
-   899.00, 'one_time', null),
+   5.00, 'one_time', null),
 
   ('laptop-sleeve', 'Laptop Sleeve 14"',
    'Water-resistant padded sleeve with an accessory pocket.',
    'https://images.unsplash.com/photo-1547949003-9792a18a2601?w=800&q=80',
-   2499.00, 'one_time', null),
+   50.00, 'one_time', null),
 
   ('rafiq-plus-monthly', 'Rafiq Plus — Monthly',
    'Free delivery, early access to drops and priority support. Charged every 30 days to your saved wallet.',
    'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=800&q=80',
-   499.00, 'subscription', 30),
+   30.00, 'subscription', 30),
 
   ('rafiq-plus-weekly', 'Rafiq Plus — Weekly',
    'All of Rafiq Plus, billed every 7 days. Cancel any time.',
    'https://images.unsplash.com/photo-1556742502-ec7c0e9f34b1?w=800&q=80',
-   149.00, 'subscription', 7);
+   10.00, 'subscription', 7);

@@ -113,6 +113,7 @@ export async function chargeSubscription(sub: Subscription): Promise<ChargeResul
       orderId: order.id,
       userId: sub.user_id,
       kind: "direct_payment",
+      operation: "direct_payment",
       call,
       gatewayTransactionId,
       operatorId: token.operator_id,
